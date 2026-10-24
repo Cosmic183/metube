@@ -11,12 +11,12 @@ import { AuthService } from '../services/auth.service';
     <div class="login-container">
       <h2>MeTube Login</h2>
       <div class="form-group mb-3">
-        <label>Username</label>
-        <input class="form-control" [(ngModel)]="username" (keyup.enter)="login()">
+        <label for="usernameInput">Username</label>
+        <input id="usernameInput" class="form-control" [(ngModel)]="username" (keyup.enter)="login()">
       </div>
       <div class="form-group mb-3">
-        <label>Password</label>
-        <input class="form-control" type="password" [(ngModel)]="password" (keyup.enter)="login()">
+        <label for="passwordInput">Password</label>
+        <input id="passwordInput" class="form-control" type="password" [(ngModel)]="password" (keyup.enter)="login()">
       </div>
       @if (error) {
         <div class="text-danger mb-3">{{ error }}</div>
