@@ -1,3 +1,8 @@
+import { AuthService } from './services/auth.service';
+import { AuthLoginComponent } from './components/auth-login.component';
+import { AuthAdminComponent } from './components/auth-admin.component';
+import { AsyncPipe } from '@angular/common';
+import { inject } from '@angular/core';
 import { NgTemplateOutlet } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
 import { AfterViewInit, ChangeDetectionStrategy, ChangeDetectorRef, Component, DestroyRef, viewChild, inject, OnDestroy, OnInit } from '@angular/core';
