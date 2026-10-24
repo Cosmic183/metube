@@ -28,13 +28,13 @@
             </svg>
             <strong>{{ $any(authService.authUser$ | async)?.username }}</strong>
           </span>
-          <button class="btn btn-outline-light btn-sm" (click)="authService.logout()">Logout</button>
+          <button class="btn btn-outline-light btn-sm" (click)="authService.logout && authService.logout()">Logout</button>
         }
       </div>
     </div>
   </nav>
 
-  @if (authService.isAdmin()) {
+  @if (authService.isAdmin && authService.isAdmin()) {
     <div class="container-fluid mb-4">
       <app-auth-admin></app-auth-admin>
     </div>
