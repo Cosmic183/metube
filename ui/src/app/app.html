@@ -1,4 +1,4 @@
-@if ((authService.isAuthenticated$ | async) === false) {
+@if ($any(authService.isAuthenticated$ | async) === false) {
   <div class="container" style="margin-top: 15vh;">
     <div class="row justify-content-center">
       <div class="col-12 col-sm-8 col-md-6 col-lg-4">
@@ -8,8 +8,8 @@
   </div>
 }
 
-<div [class.d-none]="(authService.isAuthenticated$ | async) === false">
-
+<div [class.d-none]="$any(authService.isAuthenticated$ | async) === false">
+  
   <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4 shadow-sm">
     <div class="container-fluid">
       <a class="navbar-brand d-flex align-items-center" href="#">
@@ -20,14 +20,13 @@
       </a>
       
       <div class="d-flex align-items-center ms-auto">
-
-        @if (authService.isAuthenticated$ | async) {
+        @if ($any(authService.isAuthenticated$ | async)) {
           <span class="navbar-text me-3 text-light">
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-person-circle me-1" viewBox="0 0 16 16">
               <path d="M11 6a3 3 0 1 1-6 0 3 3 0 0 1 6 0z"/>
               <path fill-rule="evenodd" d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8zm8-7a7 7 0 0 0-5.468 11.37C3.242 11.226 4.805 10 8 10s4.757 1.225 5.468 2.37A7 7 0 0 0 8 1z"/>
             </svg>
-            <strong>{{ (authService.authUser$ | async)?.username }}</strong>
+            <strong>{{ $any(authService.authUser$ | async)?.username }}</strong>
           </span>
           <button class="btn btn-outline-light btn-sm" (click)="authService.logout()">Logout</button>
         }
@@ -41,30 +40,9 @@
     </div>
   }
 
-  <div class="container-fluid">
-    
-    <app-toast-container></app-toast-container>
-    
-    <div class="row mb-4">
-      <div class="col-12">
-        <app-add></app-add>
-      </div>
-    </div>
-
-    <div class="row">
-      
-      <div class="col-12 col-xl-4 mb-4">
-        <app-downloading-section></app-downloading-section>
-      </div>
-      
-      <div class="col-12 col-xl-4 mb-4">
-        <app-completed-section></app-completed-section>
-      </div>
-      
-      <div class="col-12 col-xl-4 mb-4">
-        <app-subscriptions-section></app-subscriptions-section>
-      </div>
-
-    </div>
-  </div>
+  <main class="container">
+    <app-add-download></app-add-download>
+    <app-download-list></app-download-list>
+  </main>
+  
 </div>
