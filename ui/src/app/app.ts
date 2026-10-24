@@ -1,4 +1,6 @@
 import { AuthService } from './services/auth.service';
+import { inject } from '@angular/core';
+import { AuthService } from './services/auth.service';
 import { AuthLoginComponent } from './components/auth-login.component';
 import { NgTemplateOutlet } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
@@ -57,6 +59,7 @@ import {
   styleUrl: './app.sass',
 })
 export class App implements AfterViewInit, OnInit, OnDestroy {
+  authService = inject(AuthService);
   downloads = inject(DownloadsService);
   subscriptionsSvc = inject(SubscriptionsService);
   private toasts = inject(ToastService);
