@@ -1,57 +1,47 @@
-import { Component, inject } from '@angular/core';
-import { HttpClient } from '@angular/common/http';
-import { FormsModule } from '@angular/forms';
+import { Component } from '@angular/core';
+import { AuthService } from '../auth.service';
 
 @Component({
   selector: 'app-auth-login',
-  standalone: true,
-  imports: [FormsModule],
   template: `
-    <div class="row justify-content-center mt-5">
-      <div class="col-12 col-md-6 col-lg-5">
-        <div class="card shadow-sm">
-          <div class="card-header">Sign in</div>
-          <div class="card-body">
-            <div class="mb-3">
-              <label class="form-label" for="login-username">Username</label>
-              <input id="login-username" type="text" class="form-control" [(ngModel)]="username" name="username" autocomplete="username" />
-            </div>
-            <div class="mb-3">
-              <label class="form-label" for="login-password">Password</label>
-              <input id="login-password" type="password" class="form-control" [(ngModel)]="password" name="password" autocomplete="current-password" />
-            </div>
-            @if (error) { <div class="text-danger mb-3">{{ error }}</div> }
-            <button type="button" class="btn btn-primary w-100" (click)="login()" [disabled]="loading">
-              {{ loading ? 'Signing in...' : 'Sign in' }}
-            </button>
-          </div>
-        </div>
+    <div class="login-container mat-elevation-z4">
+      <h2>MeTube Login</h2>
+      <div class="form-group">
+        <mat-form-field appearance="fill" class="full-width">
+          <mat-label>Username</mat-label>
+          <input matInput [(ngModel)]="username" (keyup.enter)="login()">
+        </mat-form-field>
       </div>
+      <div class="form-group">
+        <mat-form-field appearance="fill" class="full-width">
+          <mat-label>Password</mat-label>
+          <input matInput type="password" [(ngModel)]="password" (keyup.enter)="login()">
+        </mat-form-field>
+      </div>
+      <div class="error-message" *ngIf="error">{{ error }}</div>
+      <button mat-raised-button color="primary" (click)="login()" [disabled]="!username || !password">Login</button>
     </div>
-  `
+  `,
+  styles: [`
+    .login-container { max-width: 400px; margin: 4rem auto; padding: 2rem; border-radius: 8px; text-align: center; background: var(--card-background-color, #fff); }
+    .full-width { width: 100%; margin-bottom: 1rem; }
+    .error-message { color: #f44336; margin-bottom: 1rem; font-weight: 500; }
+  `]
 })
 export class AuthLoginComponent {
-  private http = inject(HttpClient);
   username = '';
   password = '';
-  loading = false;
   error = '';
 
+  constructor(public authService: AuthService) {}
+
   login() {
-    this.error = '';
-    if (!this.username.trim() || !this.password) {
-      this.error = 'Username and password are required.';
-      return;
-    }
-    this.loading = true;
-    this.http.post<any>('auth/login', { username: this.username.trim(), password: this.password }).subscribe({
-      next: (res) => {
-        if (res.status === 'ok') window.location.reload();
-        else { this.error = res.msg || 'Login failed.'; this.loading = false; }
+    this.authService.login(this.username, this.password).subscribe({
+      next: (res: unknown) => {
+        this.error = '';
       },
-      error: (err) => {
-        this.error = err.error?.msg || 'Invalid username or password.';
-        this.loading = false;
+      error: (err: unknown) => {
+        this.error = 'Invalid username or password.';
       }
     });
   }
