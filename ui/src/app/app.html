@@ -40,9 +40,26 @@
     </div>
   }
 
-  <main class="container">
-    <app-add-download></app-add-download>
-    <app-download-list></app-download-list>
-  </main>
-  
+  <div class="container-fluid">
+    
+    <app-toast-container></app-toast-container>
+    
+    <div class="row mb-4">
+      <div class="col-12">
+        <app-add></app-add>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="col-12 col-xl-4 mb-4">
+        <app-downloading-section></app-downloading-section>
+      </div>
+      <div class="col-12 col-xl-4 mb-4">
+        <app-completed-section></app-completed-section>
+      </div>
+      <div class="col-12 col-xl-4 mb-4">
+        <app-subscriptions-section></app-subscriptions-section>
+      </div>
+    </div>
+  </div>
 </div>
