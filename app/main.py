@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 # pylint: disable=no-member,method-hidden
 
-import copy
-import shutil
-from auth import SessionManager, UserStore
-
 import os
 import sys
 import asyncio
+import copy
+import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 from aiohttp import web
@@ -17,7 +15,6 @@ import ssl
 import socketio
 import logging
 import json
-import pathlib
 import re
 import time
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -30,6 +27,9 @@ from download_options import DownloadOptions
 from subscriptions import SubscriptionManager, SubscriptionNotifier, SubscriptionInfo, browse_playlist, coerce_optional_bool
 from yt_dlp.version import __version__ as yt_dlp_version
 
+# Authentication imports
+from auth import SessionManager, UserStore
+
 log = logging.getLogger('main')
 
 _NIGHTLY_TIME_RE = re.compile(r'^([01]\d|2[0-3]):[0-5]\d$')
@@ -38,9 +38,7 @@ _RESTART_FOR_UPDATE = False
 def _request_graceful_exit() -> None:
     raise GracefulExit()
 
-
 def seconds_until_next_daily_time(time_hhmm: str, now: datetime | None = None) -> float:
-    """Seconds until the next occurrence of HH:MM in local time."""
     now = now or datetime.now()
     hour, minute = map(int, time_hhmm.split(':'))
     target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
@@ -48,17 +46,9 @@ def seconds_until_next_daily_time(time_hhmm: str, now: datetime | None = None) -
         target += timedelta(days=1)
     return (target - now).total_seconds()
 
-# LOGLEVEL=NONE is documented to turn logging off; a level above CRITICAL
-# drops every record.
 _LOG_LEVEL_NONE = logging.CRITICAL + 10
 
-
 def parseLogLevel(logLevel):
-    """The numeric level for a LOGLEVEL name, or None if it is not one.
-
-    Only real level names count: a bare getattr on the logging module would
-    also "resolve" attribute names such as BASIC_FORMAT.
-    """
     if not isinstance(logLevel, str):
         return None
     name = logLevel.strip().upper()
@@ -67,8 +57,6 @@ def parseLogLevel(logLevel):
     level = logging.getLevelNamesMapping().get(name)
     return level if isinstance(level, int) and name != 'NOTSET' else None
 
-# Configure logging before Config() uses it so early messages are not dropped.
-# Only configure if no handlers are set (avoid clobbering hosting app settings).
 if not logging.getLogger().hasHandlers():
     logging.basicConfig(level=parseLogLevel(os.environ.get('LOGLEVEL', 'INFO')) or logging.INFO)
 
@@ -115,9 +103,16 @@ class Config:
         'LOGLEVEL': 'INFO',
         'ENABLE_ACCESSLOG': 'false',
         'YTDL_NIGHTLY_UPDATE_TIME': '',
+        # Auth Config
+        'ENABLE_AUTH': 'false',
+        'AUTH_USERS_FILE': 'users.json',
+        'AUTH_ADMIN_USERNAME': '',
+        'AUTH_ADMIN_PASSWORD': '',
+        'AUTH_SESSION_SECRET': '',
+        'AUTH_SESSION_TTL': '2592000',
     }
 
-    _BOOLEAN = ('DOWNLOAD_DIRS_INDEXABLE', 'CUSTOM_DIRS', 'CREATE_CUSTOM_DIRS', 'HTTPS', 'ENABLE_ACCESSLOG', 'ALLOW_YTDL_OPTIONS_OVERRIDES', 'ALLOW_PRIVATE_ADDRESSES')
+    _BOOLEAN = ('DOWNLOAD_DIRS_INDEXABLE', 'CUSTOM_DIRS', 'CREATE_CUSTOM_DIRS', 'HTTPS', 'ENABLE_ACCESSLOG', 'ALLOW_YTDL_OPTIONS_OVERRIDES', 'ALLOW_PRIVATE_ADDRESSES', 'ENABLE_AUTH')
 
     def __init__(self):
         for k, v in self._DEFAULTS.items():
@@ -132,10 +127,6 @@ class Config:
                     sys.exit(1)
                 setattr(self, k, v in ('true', 'True', 'on', '1'))
 
-        # DELETE_FILE_ON_TRASHCAN is a tri-state, not a plain boolean: 'ask' defers
-        # the decision to the user at delete time (see the /delete route), while
-        # 'true'/'false' keep the historical always/never behavior. Normalize the
-        # existing boolean spellings plus 'ask' to one of these three strings.
         raw = self.DELETE_FILE_ON_TRASHCAN.strip()
         if raw in ('true', 'True', 'on', '1'):
             self.DELETE_FILE_ON_TRASHCAN = 'true'
@@ -147,36 +138,17 @@ class Config:
             log.error(f'Environment variable "DELETE_FILE_ON_TRASHCAN" is set to an invalid value "{raw}", expected one of "true", "false", "ask"')
             sys.exit(1)
 
-        # aiohttp hands HOST straight to getaddrinfo, which has no notion of a
-        # '*' wildcard: the lookup fails and takes the server down at startup
-        # with an opaque DNS error. '*' is nevertheless what people reach for
-        # when they want to serve both IP stacks, while the value that actually
-        # does it -- an empty string, which asyncio expands to one listening
-        # socket per address family -- is undiscoverable. Accept '*' as the
-        # spelling for "every interface, both stacks". Note that '::' on its own
-        # is IPv6-only regardless of the host's bindv6only setting, because
-        # asyncio always sets IPV6_V6ONLY on the sockets it binds.
         if self.HOST.strip() == '*':
             self.HOST = ''
 
         if not self.URL_PREFIX.endswith('/'):
             self.URL_PREFIX += '/'
 
-        # Strip trailing slashes from the download directories. get_custom_dirs()
-        # builds the folder dropdown by removing the base path as a prefix from
-        # each subdirectory, and the base directory's own path does not carry the
-        # trailing slash — so 'DOWNLOAD_DIR=/downloads/' failed to match itself
-        # and leaked 'downloads' into the dropdown as a bogus folder option.
-        # Runs after the '%%' indirection above so AUDIO_DOWNLOAD_DIR is resolved.
         for attr in ('DOWNLOAD_DIR', 'AUDIO_DOWNLOAD_DIR', 'TEMP_DIR', 'STATE_DIR'):
             val = getattr(self, attr)
             if isinstance(val, str) and len(val) > 1 and val.endswith('/'):
                 setattr(self, attr, val.rstrip('/') or '/')
 
-        # A blank PUBLIC_HOST_AUDIO_URL (e.g. set empty in a compose file) bypasses the
-        # default via os.environ.get, which would leave audio links root-relative and 404.
-        # Fall back to the 'audio_download/' route that serves AUDIO_DOWNLOAD_DIR. When
-        # PUBLIC_HOST_URL is also blank we leave it blank to preserve serving from web root.
         if not self.PUBLIC_HOST_AUDIO_URL and self.PUBLIC_HOST_URL:
             self.PUBLIC_HOST_AUDIO_URL = self._DEFAULTS['PUBLIC_HOST_AUDIO_URL']
 
@@ -185,61 +157,49 @@ class Config:
             if val and not val.endswith('/'):
                 setattr(self, attr, val + '/')
 
-        # DEFAULT_FOLDER only pre-fills the form's folder field, which the UI
-        # does not even show without CUSTOM_DIRS. Sending one anyway would fail
-        # every download on the server's own folder check, so drop it and say so
-        # rather than leaving the user with a form that cannot submit.
         self.DEFAULT_FOLDER = self.DEFAULT_FOLDER.strip().strip('/')
         if self.DEFAULT_FOLDER and not self.CUSTOM_DIRS:
-            log.warning(
-                'Ignoring DEFAULT_FOLDER "%s" because CUSTOM_DIRS is not enabled',
-                self.DEFAULT_FOLDER,
-            )
+            log.warning('Ignoring DEFAULT_FOLDER "%s" because CUSTOM_DIRS is not enabled', self.DEFAULT_FOLDER)
             self.DEFAULT_FOLDER = ''
 
-        # Convert relative addresses to absolute addresses to prevent the failure of file address comparison
         if self.YTDL_OPTIONS_FILE and self.YTDL_OPTIONS_FILE.startswith('.'):
             self.YTDL_OPTIONS_FILE = str(Path(self.YTDL_OPTIONS_FILE).resolve())
         if self.YTDL_OPTIONS_PRESETS_FILE and self.YTDL_OPTIONS_PRESETS_FILE.startswith('.'):
             self.YTDL_OPTIONS_PRESETS_FILE = str(Path(self.YTDL_OPTIONS_PRESETS_FILE).resolve())
+            
+        if self.AUTH_USERS_FILE and not os.path.isabs(self.AUTH_USERS_FILE):
+            self.AUTH_USERS_FILE = os.path.join(self.STATE_DIR, self.AUTH_USERS_FILE)
 
         if self.YTDL_NIGHTLY_UPDATE_TIME and not _NIGHTLY_TIME_RE.match(self.YTDL_NIGHTLY_UPDATE_TIME):
-            log.error(
-                'Environment variable "YTDL_NIGHTLY_UPDATE_TIME" must be HH:MM (24-hour), got "%s"',
-                self.YTDL_NIGHTLY_UPDATE_TIME,
-            )
+            log.error('Environment variable "YTDL_NIGHTLY_UPDATE_TIME" must be HH:MM (24-hour), got "%s"', self.YTDL_NIGHTLY_UPDATE_TIME)
             sys.exit(1)
 
-        # A variable set blank in a compose file means "use the default".
         for attr in ('LOGLEVEL', 'DEFAULT_THEME'):
             if not getattr(self, attr).strip():
                 setattr(self, attr, self._DEFAULTS[attr])
 
         if parseLogLevel(self.LOGLEVEL) is None:
-            log.error(
-                'Environment variable "LOGLEVEL" must be one of DEBUG, INFO, WARNING, ERROR, '
-                'CRITICAL or NONE, got "%s"', self.LOGLEVEL)
+            log.error('Environment variable "LOGLEVEL" must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL or NONE, got "%s"', self.LOGLEVEL)
             sys.exit(1)
 
-        # The theme cookie is matched against the UI's theme ids as-is.
         self.DEFAULT_THEME = self.DEFAULT_THEME.strip().lower()
         if self.DEFAULT_THEME not in ('light', 'dark', 'auto'):
-            log.error(
-                'Environment variable "DEFAULT_THEME" must be one of light, dark or auto, got "%s"',
-                self.DEFAULT_THEME)
+            log.error('Environment variable "DEFAULT_THEME" must be one of light, dark or auto, got "%s"', self.DEFAULT_THEME)
             sys.exit(1)
 
-        # Compiled once here: get_custom_dirs() runs inside every Socket.IO
-        # connect, where a bad pattern used to raise on each one and leave the
-        # client without its folder list.
         try:
-            self.CUSTOM_DIRS_EXCLUDE_RE = (
-                re.compile(self.CUSTOM_DIRS_EXCLUDE_REGEX) if self.CUSTOM_DIRS_EXCLUDE_REGEX else None
-            )
+            self.CUSTOM_DIRS_EXCLUDE_RE = re.compile(self.CUSTOM_DIRS_EXCLUDE_REGEX) if self.CUSTOM_DIRS_EXCLUDE_REGEX else None
         except re.error as exc:
-            log.error(
-                'Environment variable "CUSTOM_DIRS_EXCLUDE_REGEX" is not a valid regular expression '
-                '("%s"): %s', self.CUSTOM_DIRS_EXCLUDE_REGEX, exc)
+            log.error('Environment variable "CUSTOM_DIRS_EXCLUDE_REGEX" is not a valid regular expression ("%s"): %s', self.CUSTOM_DIRS_EXCLUDE_REGEX, exc)
+            sys.exit(1)
+            
+        try:
+            self.AUTH_SESSION_TTL = int(self.AUTH_SESSION_TTL)
+        except ValueError:
+            log.error('Environment variable "AUTH_SESSION_TTL" must be an integer value in seconds')
+            sys.exit(1)
+        if self.AUTH_SESSION_TTL <= 0:
+            log.error('Environment variable "AUTH_SESSION_TTL" must be greater than zero')
             sys.exit(1)
 
         self._validate_int('MAX_CONCURRENT_DOWNLOADS', minimum=1)
@@ -260,8 +220,6 @@ class Config:
             sys.exit(1)
 
     def _validate_int(self, key, *, minimum=None, maximum=None):
-        """Check an integer setting and store it as an int, so nothing
-        downstream has to convert (or re-validate) it."""
         raw = getattr(self, key)
         try:
             value = int(raw)
@@ -287,8 +245,6 @@ class Config:
     def _apply_runtime_overrides(self):
         self.YTDL_OPTIONS.update(self._runtime_overrides)
 
-    # Keys sent to the browser. Sensitive or server-only keys (YTDL_OPTIONS,
-    # paths, TLS config, etc.) are intentionally excluded.
     _FRONTEND_KEYS = (
         'CUSTOM_DIRS',
         'CREATE_CUSTOM_DIRS',
@@ -303,17 +259,9 @@ class Config:
     )
 
     def frontend_safe(self) -> dict:
-        """Return only the config keys that are safe to expose to browser clients.
-
-        Sensitive or server-only keys (YTDL_OPTIONS, file-system paths, TLS
-        settings, etc.) are intentionally excluded.
-        """
         return {k: getattr(self, k) for k in self._FRONTEND_KEYS}
 
     def _env_json(self, key: str):
-        """The JSON in an environment variable, parsed afresh (a reload reads the
-        environment again, since the attribute holds the parsed value). Unset or
-        blank -- as a compose file often leaves it -- means the default."""
         raw = os.environ.get(key, '').strip() or self._DEFAULTS[key]
         return json.loads(raw)
 
@@ -380,40 +328,112 @@ class Config:
         return (True, '')
 
 config = Config()
-# Align root logger level with Config (keeps a single source of truth).
-# This re-applies the log level after Config loads, in case LOGLEVEL was
-# overridden by config file settings or differs from the environment variable.
 logging.getLogger().setLevel(parseLogLevel(str(config.LOGLEVEL)) or logging.INFO)
+
+# Auth initialization
+user_store = None
+session_manager = None
+if config.ENABLE_AUTH:
+    try:
+        user_store = UserStore(config.AUTH_USERS_FILE)
+        user_store.ensure_bootstrap_admin(config.AUTH_ADMIN_USERNAME, config.AUTH_ADMIN_PASSWORD)
+        session_secret = config.AUTH_SESSION_SECRET
+        if not session_secret:
+            session_secret = os.urandom(32).hex()
+            log.warning("AUTH_SESSION_SECRET is not set; sessions will be invalidated on restart.")
+        session_manager = SessionManager(session_secret, config.AUTH_SESSION_TTL)
+    except Exception as exc:
+        log.error("Failed to initialize authentication subsystem: %s", exc)
+        sys.exit(1)
+
+def _route_with_prefix(path: str) -> str:
+    return config.URL_PREFIX + path
+
+_AUTH_PROTECTED_EXACT_PATHS = {
+    _route_with_prefix('add'),
+    _route_with_prefix('delete'),
+    _route_with_prefix('start'),
+    _route_with_prefix('history'),
+    _route_with_prefix('cancel-add'),
+    _route_with_prefix('retry'),
+    _route_with_prefix('subscribe'),
+    _route_with_prefix('subscriptions/update'),
+    _route_with_prefix('subscriptions/delete'),
+    _route_with_prefix('subscriptions/check'),
+    _route_with_prefix('auth/users'),
+}
+_AUTH_PROTECTED_PREFIX_PATHS = (
+    _route_with_prefix('download/'),
+    _route_with_prefix('audio_download/'),
+    _route_with_prefix('socket.io'),
+    _route_with_prefix('auth/users/'),
+)
+
+def public_user_from_session_user(session_user):
+    return {
+        'username': session_user['username'],
+        'role': session_user['role'],
+    }
+
+@web.middleware
+async def auth_middleware(request, handler):
+    request['auth_user'] = None
+    if not config.ENABLE_AUTH:
+        return await handler(request)
+
+    session_user = session_manager.user_from_request(request) if session_manager is not None else None
+    user = None
+    if session_user is not None and user_store is not None:
+        persisted_user = user_store.get_session_user(session_user['username'])
+        if persisted_user is not None and persisted_user.get('session_version') == session_user.get('session_version'):
+            user = public_user_from_session_user(persisted_user)
+            
+    if user is not None:
+        request['auth_user'] = user
+
+    path = request.path
+    is_protected = (
+        path in _AUTH_PROTECTED_EXACT_PATHS
+        or any(path.startswith(prefix) for prefix in _AUTH_PROTECTED_PREFIX_PATHS)
+    )
+
+    if is_protected and user is None:
+        raise web.HTTPUnauthorized()
+
+    return await handler(request)
+
+def require_authenticated_user(request):
+    user = request.get('auth_user')
+    if config.ENABLE_AUTH and user is None:
+        raise web.HTTPUnauthorized()
+    return user
+
+def require_admin(request):
+    user = require_authenticated_user(request)
+    if user is None or user.get('role') != 'admin':
+        raise web.HTTPForbidden()
+    return user
 
 class ObjectSerializer(json.JSONEncoder):
     def default(self, obj):
-        # Prefer an explicit client-facing view when the object provides one
-        # (e.g. DownloadInfo / SubscriptionInfo) so server-only or bulky fields
-        # are never broadcast to browser clients.
         to_public = getattr(obj, 'to_public_dict', None)
         if callable(to_public):
             return to_public()
-        # Fall back to __dict__ for other custom objects
         if hasattr(obj, '__dict__'):
             return obj.__dict__
-        # Convert iterables (generators, dict_items, etc.) to lists
-        # Exclude strings and bytes which are also iterable
         elif hasattr(obj, '__iter__') and not isinstance(obj, (str, bytes)):
             try:
                 return list(obj)
             except Exception:
                 pass
-        # Fall back to default behavior
         return json.JSONEncoder.default(self, obj)
 
 serializer = ObjectSerializer()
 
 _STATE_DIR_REAL = os.path.realpath(config.STATE_DIR)
 
-
 def _is_within_state_dir(real_target: str) -> bool:
     return real_target == _STATE_DIR_REAL or real_target.startswith(_STATE_DIR_REAL + os.sep)
-
 
 @web.middleware
 async def state_dir_guard(request, handler):
@@ -422,9 +442,6 @@ async def state_dir_guard(request, handler):
         (config.URL_PREFIX + 'audio_download/', config.AUDIO_DOWNLOAD_DIR),
     ):
         if request.path.startswith(prefix):
-            # request.path is already percent-decoded by aiohttp; decoding it
-            # again would mangle a download whose filename contains a literal
-            # '%' (e.g. "%" turning into a truncated escape) into a false 404.
             rel = request.path[len(prefix):]
             target = os.path.realpath(os.path.join(base, rel))
             if _is_within_state_dir(target):
@@ -432,56 +449,24 @@ async def state_dir_guard(request, handler):
             break
     return await handler(request)
 
-
 def _origin_is_trusted(origin, sec_fetch_site, hosts) -> bool:
-    """Whether a browser request from *origin* may act on this instance.
-
-    CORS only decides whether a page may *read* a response. A browser still
-    sends a cross-site text/plain or multipart POST without a preflight, with
-    whatever credentials it holds for MeTube (a reverse proxy's login cookie,
-    cached basic auth), and on an instance without auth any page the user
-    visits can reach it over the LAN. So the origin has to be checked before
-    the request acts, not after.
-
-    Passes MeTube's own UI (same-origin), the origins named in
-    CORS_ALLOWED_ORIGINS, and everything under the '*' wildcard, which is the
-    operator letting every site in. A request carrying neither Origin nor
-    Sec-Fetch-Site is not from a browser page (curl, the iOS shortcut, Raycast)
-    and passes too: a forged request needs a victim's browser. Modelled on Go's
-    net/http CrossOriginProtection.
-    """
     if origin and ('*' in _cors_origins or origin in _cors_origins):
         return True
     if sec_fetch_site:
-        # It answers the question directly and, unlike comparing Origin with
-        # Host, survives a reverse proxy that rewrites Host. But browsers send
-        # it only to secure origins (HTTPS or localhost), so a plain-HTTP
-        # instance on a LAN address never gets it. 'none' is a user-initiated
-        # request, such as one typed into the address bar.
         return sec_fetch_site in ('same-origin', 'none')
     if not origin:
         return True
-    # Plain HTTP or an older browser: compare Origin with the host the request
-    # was addressed to. X-Forwarded-Host is safe to accept here, since a page
-    # cannot set it on a cross-origin request without a preflight. A proxy that
-    # rewrites Host and sends no X-Forwarded-Host (nginx's `Host $host` drops
-    # the port) makes MeTube's own UI look cross-origin; see _log_refusal.
     try:
         netloc = urlparse(origin).netloc.lower()
     except ValueError:
         return False
     return bool(netloc) and any(h and h.split(',')[0].strip().lower() == netloc for h in hosts)
 
-
 _SAFE_METHODS = ('GET', 'HEAD', 'OPTIONS')
-
 
 def _log_refusal(what, origin, sec_fetch_site, hosts):
     if sec_fetch_site:
-        # The browser itself said the request came from another site.
-        log.warning(
-            'Refused cross-origin %s from %s. If this is a bookmarklet or extension you use, '
-            'add its origin to CORS_ALLOWED_ORIGINS.', what, origin)
+        log.warning('Refused cross-origin %s from %s. If this is a bookmarklet or extension you use, add its origin to CORS_ALLOWED_ORIGINS.', what, origin)
         return
     host, forwarded_host = hosts
     log.warning(
@@ -492,7 +477,6 @@ def _log_refusal(what, origin, sec_fetch_site, hosts):
         'its origin to CORS_ALLOWED_ORIGINS.',
         what, origin, host, f' (X-Forwarded-Host {forwarded_host})' if forwarded_host else '', origin)
 
-
 @web.middleware
 async def cross_origin_guard(request, handler):
     if request.method not in _SAFE_METHODS:
@@ -501,12 +485,6 @@ async def cross_origin_guard(request, handler):
         sec_fetch_site = request.headers.get('Sec-Fetch-Site')
         if not _origin_is_trusted(origin, sec_fetch_site, hosts):
             _log_refusal(f'{request.method} {request.path}', origin, sec_fetch_site, hosts)
-            # Make the refusal itself readable to the page that sent it. A
-            # bookmarklet whose site is not listed would otherwise see only a
-            # network error, indistinguishable from MeTube being down, and
-            # bookmarklets written before this check was added show nothing
-            # at all on one. The body names nothing but the page's own origin,
-            # so the page learns only that it was refused.
             headers = {}
             if origin:
                 headers = {
@@ -516,27 +494,20 @@ async def cross_origin_guard(request, handler):
                 }
             raise web.HTTPForbidden(
                 reason='Cross-origin request not allowed', headers=headers,
-                text=f'MeTube refused this request from {origin}. '
-                     'Add that origin to CORS_ALLOWED_ORIGINS to allow it.')
+                text=f'MeTube refused this request from {origin}. Add that origin to CORS_ALLOWED_ORIGINS to allow it.')
     return await handler(request)
 
-
 def _socketio_origin_allowed(origin, environ):
-    # Browsers apply no CORS to WebSockets, so this check is all that stops a
-    # page on another site from connecting and reading the queue, history and
-    # configuration the connect handler sends.
     hosts = (environ.get('HTTP_HOST'), environ.get('HTTP_X_FORWARDED_HOST'))
     sec_fetch_site = environ.get('HTTP_SEC_FETCH_SITE')
     if _origin_is_trusted(origin, sec_fetch_site, hosts):
         return True
-    # engine.io asks again while building the refusal response; log once.
     if not environ.get('metube.origin_refusal_logged'):
         environ['metube.origin_refusal_logged'] = True
         _log_refusal('Socket.IO connection', origin, sec_fetch_site, hosts)
     return False
 
-
-app = web.Application(middlewares=[cross_origin_guard, state_dir_guard])
+app = web.Application(middlewares=[cross_origin_guard, state_dir_guard] + ([auth_middleware] if config.ENABLE_AUTH else []))
 _cors_origins = [o.strip() for o in config.CORS_ALLOWED_ORIGINS.split(',') if o.strip()] if config.CORS_ALLOWED_ORIGINS else []
 if '*' in _cors_origins and len(_cors_origins) > 1:
     log.warning(
@@ -547,33 +518,291 @@ if '*' in _cors_origins and len(_cors_origins) > 1:
 sio = socketio.AsyncServer(cors_allowed_origins=_socketio_origin_allowed)
 sio.attach(app, socketio_path=config.URL_PREFIX + 'socket.io')
 routes = web.RouteTableDef()
+
+class Notifier(DownloadQueueNotifier):
+    def __init__(self, room=None):
+        self.room = room
+
+    async def _emit(self, event, payload):
+        if self.room is not None:
+            await sio.emit(event, payload, to=self.room)
+        else:
+            await sio.emit(event, payload)
+
+    async def added(self, dl):
+        log.info(f"Notifier: Download added - {dl.title}")
+        await self._emit('added', serializer.encode(dl))
+
+    async def updated(self, dl):
+        log.debug(f"Notifier: Download updated - {dl.title}")
+        await self._emit('updated', serializer.encode(dl))
+
+    async def completed(self, dl):
+        log.info(f"Notifier: Download completed - {dl.title}")
+        await self._emit('completed', serializer.encode(dl))
+
+    async def canceled(self, id):
+        log.info(f"Notifier: Download canceled - {id}")
+        await self._emit('canceled', serializer.encode(id))
+
+    async def cleared(self, id):
+        log.info(f"Notifier: Download cleared - {id}")
+        await self._emit('cleared', serializer.encode(id))
+
+class MetubeSubscriptionNotifier(SubscriptionNotifier):
+    def __init__(self, room=None):
+        self.room = room
+
+    async def _emit(self, event, payload):
+        if self.room is not None:
+            await sio.emit(event, payload, to=self.room)
+        else:
+            await sio.emit(event, payload)
+
+    async def subscription_added(self, sub: SubscriptionInfo):
+        log.info("Subscription added: %s", sub.name)
+        await self._emit('subscription_added', serializer.encode(sub.to_public_dict()))
+
+    async def subscription_updated(self, sub: SubscriptionInfo):
+        await self._emit('subscription_updated', serializer.encode(sub.to_public_dict()))
+
+    async def subscription_removed(self, sub_id: str):
+        log.info("Subscription removed: %s", sub_id)
+        await self._emit('subscription_removed', serializer.encode(sub_id))
+
+    async def subscriptions_all(self, subs: list[SubscriptionInfo]):
+        await self._emit('subscriptions_all', serializer.encode([s.to_public_dict() for s in subs]))
+
+class UserEnvironmentRegistry:
+    def __init__(self, base_config):
+        self.base_config = base_config
+        self._envs = {}
+        self._lock = asyncio.Lock()
+
+    def room(self, username):
+        return f'user:{username}'
+
+    def user_paths(self, username):
+        download_dir = os.path.join(self.base_config.DOWNLOAD_DIR, username)
+        audio_download_dir = download_dir if self.base_config.AUDIO_DOWNLOAD_DIR == self.base_config.DOWNLOAD_DIR else os.path.join(self.base_config.AUDIO_DOWNLOAD_DIR, username)
+        temp_dir = download_dir if self.base_config.TEMP_DIR == self.base_config.DOWNLOAD_DIR else os.path.join(self.base_config.TEMP_DIR, username)
+        state_dir = os.path.join(self.base_config.STATE_DIR, 'users', username)
+        return {
+            'download_dir': download_dir,
+            'audio_download_dir': audio_download_dir,
+            'temp_dir': temp_dir,
+            'state_dir': state_dir,
+        }
+
+    def _build_user_config(self, username):
+        paths = self.user_paths(username)
+        user_config = copy.copy(self.base_config)
+        user_config.DOWNLOAD_DIR = paths['download_dir']
+        user_config.AUDIO_DOWNLOAD_DIR = paths['audio_download_dir']
+        user_config.TEMP_DIR = paths['temp_dir']
+        user_config.STATE_DIR = paths['state_dir']
+        for directory in (user_config.DOWNLOAD_DIR, user_config.AUDIO_DOWNLOAD_DIR, user_config.TEMP_DIR, user_config.STATE_DIR):
+            os.makedirs(directory, exist_ok=True)
+        return user_config
+
+    async def get(self, username):
+        env = self._envs.get(username)
+        if env is not None:
+            return env
+        async with self._lock:
+            env = self._envs.get(username)
+            if env is not None:
+                return env
+            user_config = self._build_user_config(username)
+            room_name = self.room(username)
+            queue = DownloadQueue(user_config, Notifier(room=room_name))
+            submgr = SubscriptionManager(user_config, queue, MetubeSubscriptionNotifier(room=room_name))
+            env = {'queue': queue, 'submgr': submgr, 'config': user_config}
+            self._envs[username] = env
+            await queue.initialize()
+            submgr.start_background_loop()
+            return env
+
+    def get_if_present(self, username):
+        return self._envs.get(username)
+
+    async def remove(self, username):
+        async with self._lock:
+            env = self._envs.pop(username, None)
+            if env:
+                env['submgr'].close()
+                env['queue'].close()
+
+
+dqueue = DownloadQueue(config, Notifier()) if not config.ENABLE_AUTH else None
+submgr = SubscriptionManager(config, dqueue, MetubeSubscriptionNotifier()) if not config.ENABLE_AUTH else None
+user_envs = UserEnvironmentRegistry(config) if config.ENABLE_AUTH else None
+
+
+async def env_for_request(request):
+    if config.ENABLE_AUTH:
+        user = require_authenticated_user(request)
+        return await user_envs.get(user['username'])
+    return {'queue': dqueue, 'submgr': submgr, 'config': config}
+
+
+async def _download_queue_startup(app):
+    if config.ENABLE_AUTH and user_store is not None:
+        for user in user_store.list_users():
+            await user_envs.get(user['username'])
+    elif dqueue is not None:
+        await dqueue.initialize()
+
+async def _shutdown_download_manager(app):
+    if config.ENABLE_AUTH and user_store is not None:
+        for user in user_store.list_users():
+            env = user_envs.get_if_present(user['username'])
+            if env:
+                env['queue'].close()
+    elif dqueue is not None:
+        dqueue.close()
+    Download.shutdown_manager()
+
+app.on_startup.append(_download_queue_startup)
+app.on_cleanup.append(_shutdown_download_manager)
+
+async def _shutdown_subscriptions(app):
+    if config.ENABLE_AUTH and user_store is not None:
+        for user in user_store.list_users():
+            env = user_envs.get_if_present(user['username'])
+            if env:
+                env['submgr'].close()
+    elif submgr is not None:
+        submgr.close()
+
+app.on_cleanup.append(_shutdown_subscriptions)
+
+async def _subscription_loop_startup(app):
+    if not config.ENABLE_AUTH and submgr is not None:
+        submgr.start_background_loop()
+app.on_startup.append(_subscription_loop_startup)
+
+async def _schedule_nightly_update() -> None:
+    global _RESTART_FOR_UPDATE
+    time_hhmm = config.YTDL_NIGHTLY_UPDATE_TIME
+    if not time_hhmm:
+        return
+    delay = seconds_until_next_daily_time(time_hhmm)
+    log.info('Next yt-dlp nightly update in %.0f seconds (at %s local time)', delay, time_hhmm)
+    await asyncio.sleep(delay)
+    log.info('Scheduled yt-dlp nightly update: requesting restart')
+    _RESTART_FOR_UPDATE = True
+    asyncio.get_running_loop().call_soon(_request_graceful_exit)
+
+async def _start_nightly_update_schedule(app):
+    bg_tasks.create_task(_schedule_nightly_update(), name="nightly_update_schedule")
+
+app.on_startup.append(_start_nightly_update_schedule)
+
+def get_options_update_time(success=True, msg=''):
+    result = {
+        'success': success,
+        'msg': msg,
+        'update_time': None
+    }
+    if config.YTDL_OPTIONS_FILE and os.path.exists(config.YTDL_OPTIONS_FILE):
+        try:
+            result['update_time'] = os.path.getmtime(config.YTDL_OPTIONS_FILE)
+        except (OSError, IOError) as e:
+            log.warning(f"Could not get modification time for {config.YTDL_OPTIONS_FILE}: {e}")
+            result['update_time'] = None
+    return result
+
+def _options_file_signature(path: str):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
+
+async def _watch_options_file(on_change, *, debounce: int = 1600, stop_event=None) -> None:
+    path = os.path.abspath(config.YTDL_OPTIONS_FILE)
+    last = _options_file_signature(path)
+    async for _changes in awatch(
+        os.path.dirname(path), recursive=False, debounce=debounce, stop_event=stop_event,
+    ):
+        current = _options_file_signature(path)
+        if current == last:
+            continue
+        last = current
+        await on_change()
+
+async def _reload_ytdl_options() -> None:
+    success, msg = config.load_ytdl_options()
+    await sio.emit('ytdl_options_changed', serializer.encode(get_options_update_time(success, msg)))
+
+async def watch_files():
+    log.info(f'Starting Watch File: {config.YTDL_OPTIONS_FILE}')
+    bg_tasks.create_task(_watch_options_file(_reload_ytdl_options), name="watch_ytdl_options_file")
+
+async def _watch_files_startup(app):
+    await watch_files()
+
+if config.YTDL_OPTIONS_FILE:
+    app.on_startup.append(_watch_files_startup)
+
+async def _read_json_request(request: web.Request) -> dict:
+    try:
+        post = await request.json()
+    except json.JSONDecodeError as exc:
+        raise web.HTTPBadRequest(reason='Invalid JSON request body') from exc
+    if not isinstance(post, dict):
+        raise web.HTTPBadRequest(reason='JSON request body must be an object')
+    return post
+
+def _bool_field(post: dict, key: str, default: bool) -> bool:
+    value = post.get(key)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    try:
+        return coerce_optional_bool(value, default=default, field_name=key)
+    except ValueError as exc:
+        raise web.HTTPBadRequest(reason=str(exc)) from exc
+
+def _str_field(post: dict, key: str, default):
+    value = post.get(key)
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise web.HTTPBadRequest(reason=f"'{key}' must be a string")
+    return value
+
+def _playlist_item_limit_field(post: dict, env_config=config) -> int:
+    value = post.get('playlist_item_limit')
+    if value is None:
+        value = env_config.DEFAULT_OPTION_PLAYLIST_ITEM_LIMIT
+    if isinstance(value, bool):
+        raise web.HTTPBadRequest(reason='playlist_item_limit must be an integer')
+    try:
+        value = int(value)
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(reason='playlist_item_limit must be an integer') from exc
+    if value < 0:
+        raise web.HTTPBadRequest(reason='playlist_item_limit must not be negative')
+    return value
+
 def _parse_ytdl_options_overrides(value, *, enabled: bool) -> dict:
     if value is None or value == '':
         return {}
-
     if isinstance(value, str):
         try:
             value = json.loads(value)
         except json.JSONDecodeError as exc:
             raise web.HTTPBadRequest(reason='ytdl_options_overrides must be valid JSON') from exc
-
     if not isinstance(value, dict):
         raise web.HTTPBadRequest(reason='ytdl_options_overrides must be a JSON object')
-
     if value and not enabled:
         raise web.HTTPBadRequest(reason='ytdl_options_overrides are disabled')
-
     return value
 
-
-_YOUTUBE_T_COMPACT_RE = re.compile(
-    r'^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)(?:s)?)?$',
-    re.IGNORECASE,
-)
-
+_YOUTUBE_T_COMPACT_RE = re.compile(r'^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)(?:s)?)?$', re.IGNORECASE)
 
 def _parse_youtube_t_compact(value: str) -> float | None:
-    """Parse YouTube-style ``t`` values: ``885``, ``885s``, ``14m45s``, ``1h2m3s``."""
     v = value.strip()
     if not v:
         return None
@@ -589,9 +818,7 @@ def _parse_youtube_t_compact(value: str) -> float | None:
         return float(total) if total >= 0 else None
     return None
 
-
 def _parse_clock_timestamp(s: str) -> float:
-    """Parse ``MM:SS``, ``H:MM:SS``, or single segment as seconds (with optional decimals)."""
     part = s.strip()
     if not part:
         raise ValueError('empty timestamp')
@@ -610,9 +837,7 @@ def _parse_clock_timestamp(s: str) -> float:
         return nums[0] * 60 + nums[1]
     return nums[0] * 3600 + nums[1] * 60 + nums[2]
 
-
 def _parse_clip_timestamp_value(value) -> float:
-    """Coerce a clip boundary from JSON to seconds (non-negative)."""
     if isinstance(value, bool):
         raise web.HTTPBadRequest(reason='clip timestamp must be a number or string')
     if isinstance(value, (int, float)):
@@ -632,14 +857,12 @@ def _parse_clip_timestamp_value(value) -> float:
         return compact
     raise web.HTTPBadRequest(reason='invalid clip timestamp format')
 
-
 def _optional_clip_field(raw) -> float | None:
     if raw is None:
         return None
     if isinstance(raw, str) and not raw.strip():
         return None
     return _parse_clip_timestamp_value(raw)
-
 
 def _clip_field_provided_in_post(raw) -> bool:
     if raw is None:
@@ -648,14 +871,7 @@ def _clip_field_provided_in_post(raw) -> bool:
         return False
     return True
 
-
 def _extract_t_query_from_url(url: str) -> tuple[str, float | None]:
-    """If ``t=`` is present and parseable, return URL without ``t`` and start seconds.
-
-    Restricted to YouTube hosts: ``t`` is a generic query parameter name that
-    other sites may use for unrelated purposes, so rewriting it there would
-    silently mutate the URL and inject a bogus clip start.
-    """
     try:
         parsed = urlparse(url)
         params = parse_qs(parsed.query)
@@ -682,9 +898,7 @@ def _extract_t_query_from_url(url: str) -> tuple[str, float | None]:
     ))
     return cleaned, float(start)
 
-
 def _parse_ytdl_options_presets(post: dict) -> list[str]:
-    """Normalize preset names from add/subscribe body; supports list or legacy singular string."""
     raw = post.get('ytdl_options_presets')
     if raw is None:
         raw = post.get('ytdl_options_preset')
@@ -695,41 +909,19 @@ def _parse_ytdl_options_presets(post: dict) -> list[str]:
     if isinstance(raw, str):
         s = raw.strip()
         return [s] if s else []
-    raise web.HTTPBadRequest(
-        reason='ytdl_options_presets must be a JSON array of strings (or legacy ytdl_options_preset string)',
-    )
-
+    raise web.HTTPBadRequest(reason='ytdl_options_presets must be a JSON array of strings (or legacy ytdl_options_preset string)')
 
 def _require_configured_presets(names: list[str]) -> None:
     for preset_name in names:
         if preset_name not in config.YTDL_OPTIONS_PRESETS:
             raise web.HTTPBadRequest(reason='ytdl_options_presets must only contain configured preset names')
 
-
 def _migrate_legacy_request(post: dict) -> dict:
-    """
-    BACKWARD COMPATIBILITY: Translate old API request schema into the new one.
-
-    Old API:
-      format (any/mp4/m4a/mp3/opus/wav/flac/thumbnail/captions)
-      quality
-      video_codec
-      subtitle_format (only when format=captions)
-
-    New API:
-      download_type (video/audio/captions/thumbnail)
-      codec
-      format
-      quality
-    """
     if "download_type" in post:
         return post
-
     old_format = str(post.get("format") or "any").strip().lower()
     old_quality = str(post.get("quality") or "best").strip().lower()
     old_video_codec = str(post.get("video_codec") or "auto").strip().lower()
-
-    # 'auto' postdates the legacy API, where it never named an audio format.
     if old_format in format_catalog.format_ids('audio') and old_format != 'auto':
         post["download_type"] = "audio"
         post["codec"] = "auto"
@@ -745,14 +937,12 @@ def _migrate_legacy_request(post: dict) -> dict:
         post["format"] = str(post.get("subtitle_format") or "srt").strip().lower()
         post["quality"] = "best"
     else:
-        # old_format is usually any/mp4 (legacy video path)
         post["download_type"] = "video"
         post["codec"] = old_video_codec
         if old_quality == "best_ios":
             post["format"] = "ios"
             post["quality"] = "best"
         elif old_quality == "audio":
-            # Legacy "audio only" under video format maps to m4a audio.
             post["download_type"] = "audio"
             post["codec"] = "auto"
             post["format"] = "m4a"
@@ -760,219 +950,10 @@ def _migrate_legacy_request(post: dict) -> dict:
         else:
             post["format"] = old_format
             post["quality"] = old_quality
-
-    return post
-
-class Notifier(DownloadQueueNotifier):
-    async def added(self, dl):
-        log.info(f"Notifier: Download added - {dl.title}")
-        await sio.emit('added', serializer.encode(dl))
-
-    async def updated(self, dl):
-        log.debug(f"Notifier: Download updated - {dl.title}")
-        await sio.emit('updated', serializer.encode(dl))
-
-    async def completed(self, dl):
-        log.info(f"Notifier: Download completed - {dl.title}")
-        await sio.emit('completed', serializer.encode(dl))
-
-    async def canceled(self, id):
-        log.info(f"Notifier: Download canceled - {id}")
-        await sio.emit('canceled', serializer.encode(id))
-
-    async def cleared(self, id):
-        log.info(f"Notifier: Download cleared - {id}")
-        await sio.emit('cleared', serializer.encode(id))
-
-dqueue = DownloadQueue(config, Notifier())
-
-
-async def _download_queue_startup(app):
-    await dqueue.initialize()
-
-
-async def _shutdown_download_manager(app):
-    dqueue.close()
-    Download.shutdown_manager()
-
-
-app.on_startup.append(_download_queue_startup)
-app.on_cleanup.append(_shutdown_download_manager)
-
-
-class MetubeSubscriptionNotifier(SubscriptionNotifier):
-    async def subscription_added(self, sub: SubscriptionInfo):
-        log.info("Subscription added: %s", sub.name)
-        await sio.emit('subscription_added', serializer.encode(sub.to_public_dict()))
-
-    async def subscription_updated(self, sub: SubscriptionInfo):
-        await sio.emit('subscription_updated', serializer.encode(sub.to_public_dict()))
-
-    async def subscription_removed(self, sub_id: str):
-        log.info("Subscription removed: %s", sub_id)
-        await sio.emit('subscription_removed', serializer.encode(sub_id))
-
-    async def subscriptions_all(self, subs: list[SubscriptionInfo]):
-        await sio.emit('subscriptions_all', serializer.encode([s.to_public_dict() for s in subs]))
-
-
-submgr = SubscriptionManager(config, dqueue, MetubeSubscriptionNotifier())
-
-
-async def _shutdown_subscriptions(app):
-    submgr.close()
-
-
-app.on_cleanup.append(_shutdown_subscriptions)
-
-
-async def _subscription_loop_startup(app):
-    """aiohttp on_startup requires awaitable receivers; start_background_loop is sync."""
-    submgr.start_background_loop()
-
-
-app.on_startup.append(_subscription_loop_startup)
-
-
-async def _schedule_nightly_update() -> None:
-    global _RESTART_FOR_UPDATE
-    time_hhmm = config.YTDL_NIGHTLY_UPDATE_TIME
-    if not time_hhmm:
-        return
-    delay = seconds_until_next_daily_time(time_hhmm)
-    log.info('Next yt-dlp nightly update in %.0f seconds (at %s local time)', delay, time_hhmm)
-    await asyncio.sleep(delay)
-    log.info('Scheduled yt-dlp nightly update: requesting restart')
-    _RESTART_FOR_UPDATE = True
-    asyncio.get_running_loop().call_soon(_request_graceful_exit)
-
-
-async def _start_nightly_update_schedule(app):
-    bg_tasks.create_task(_schedule_nightly_update(), name="nightly_update_schedule")
-
-
-app.on_startup.append(_start_nightly_update_schedule)
-
-def get_options_update_time(success=True, msg=''):
-    result = {
-        'success': success,
-        'msg': msg,
-        'update_time': None
-    }
-
-    # Only try to get file modification time if YTDL_OPTIONS_FILE is set and file exists
-    if config.YTDL_OPTIONS_FILE and os.path.exists(config.YTDL_OPTIONS_FILE):
-        try:
-            result['update_time'] = os.path.getmtime(config.YTDL_OPTIONS_FILE)
-        except (OSError, IOError) as e:
-            log.warning(f"Could not get modification time for {config.YTDL_OPTIONS_FILE}: {e}")
-            result['update_time'] = None
-
-    return result
-
-
-def _options_file_signature(path: str):
-    """What identifies one version of the options file, or None if it is gone.
-
-    os.stat follows symlinks, so this sees through a Kubernetes ConfigMap mount,
-    where the visible file is a symlink whose target is swapped on update.
-    """
-    try:
-        st = os.stat(path)
-    except OSError:
-        return None
-    return (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
-
-
-async def _watch_options_file(on_change, *, debounce: int = 1600, stop_event=None) -> None:
-    """Call *on_change* whenever YTDL_OPTIONS_FILE changes.
-
-    Watches the file's directory, not the file. A watch on the file itself is
-    tied to its inode, and editors, `sed -i` and config tools save by writing a
-    new file and renaming it over the old one: the first such save was seen
-    and every change after it was not. Non-recursive, so an options file kept
-    in the download directory does not put a watch on the whole library.
-    """
-    path = os.path.abspath(config.YTDL_OPTIONS_FILE)
-    last = _options_file_signature(path)
-    async for _changes in awatch(
-        os.path.dirname(path), recursive=False, debounce=debounce, stop_event=stop_event,
-    ):
-        current = _options_file_signature(path)
-        if current == last:
-            continue
-        last = current
-        await on_change()
-
-
-async def _reload_ytdl_options() -> None:
-    success, msg = config.load_ytdl_options()
-    await sio.emit('ytdl_options_changed', serializer.encode(get_options_update_time(success, msg)))
-
-
-async def watch_files():
-    log.info(f'Starting Watch File: {config.YTDL_OPTIONS_FILE}')
-    bg_tasks.create_task(_watch_options_file(_reload_ytdl_options), name="watch_ytdl_options_file")
-
-async def _watch_files_startup(app):
-    await watch_files()
-
-
-if config.YTDL_OPTIONS_FILE:
-    app.on_startup.append(_watch_files_startup)
-
-
-async def _read_json_request(request: web.Request) -> dict:
-    try:
-        post = await request.json()
-    except json.JSONDecodeError as exc:
-        raise web.HTTPBadRequest(reason='Invalid JSON request body') from exc
-    if not isinstance(post, dict):
-        raise web.HTTPBadRequest(reason='JSON request body must be an object')
     return post
 
 
-def _bool_field(post: dict, key: str, default: bool) -> bool:
-    """A boolean body field, also accepting the string and 0/1 spellings API
-    clients send. Absent, null or blank takes *default*; anything else that is
-    not a boolean is refused rather than read as truthy."""
-    value = post.get(key)
-    if value is None or (isinstance(value, str) and not value.strip()):
-        return default
-    try:
-        return coerce_optional_bool(value, default=default, field_name=key)
-    except ValueError as exc:
-        raise web.HTTPBadRequest(reason=str(exc)) from exc
-
-
-def _str_field(post: dict, key: str, default):
-    """A string body field: absent or null takes *default*, a non-string is refused."""
-    value = post.get(key)
-    if value is None:
-        return default
-    if not isinstance(value, str):
-        raise web.HTTPBadRequest(reason=f"'{key}' must be a string")
-    return value
-
-
-def _playlist_item_limit_field(post: dict) -> int:
-    value = post.get('playlist_item_limit')
-    if value is None:
-        value = config.DEFAULT_OPTION_PLAYLIST_ITEM_LIMIT
-    if isinstance(value, bool):
-        raise web.HTTPBadRequest(reason='playlist_item_limit must be an integer')
-    try:
-        value = int(value)
-    except (TypeError, ValueError) as exc:
-        raise web.HTTPBadRequest(reason='playlist_item_limit must be an integer') from exc
-    if value < 0:
-        raise web.HTTPBadRequest(reason='playlist_item_limit must not be negative')
-    return value
-
-
-def parse_download_options(post: dict) -> tuple[str, DownloadOptions]:
-    """Validate an add/subscribe body into its URL and options; raise
-    HTTPBadRequest on invalid input."""
+def parse_download_options(post: dict, env_config=config) -> tuple[str, DownloadOptions]:
     post = _migrate_legacy_request(dict(post))
     url = post.get('url')
     download_type = post.get('download_type')
@@ -984,12 +965,12 @@ def parse_download_options(post: dict) -> tuple[str, DownloadOptions]:
     url = str(url).strip()
     folder = _str_field(post, 'folder', None)
     custom_name_prefix = _str_field(post, 'custom_name_prefix', '')
-    playlist_item_limit = _playlist_item_limit_field(post)
+    playlist_item_limit = _playlist_item_limit_field(post, env_config=env_config)
     auto_start = _bool_field(post, 'auto_start', True)
     split_by_chapters = _bool_field(post, 'split_by_chapters', False)
     sponsorblock = _bool_field(post, 'sponsorblock', False)
     audio_tags = str(post.get('audio_tags') or format_catalog.choice_default('audio', 'audio_tags')).strip().lower()
-    chapter_template = _str_field(post, 'chapter_template', config.OUTPUT_TEMPLATE_CHAPTER)
+    chapter_template = _str_field(post, 'chapter_template', env_config.OUTPUT_TEMPLATE_CHAPTER)
     subtitle_language = post.get('subtitle_language')
     subtitle_mode = post.get('subtitle_mode')
     ytdl_options_overrides = post.get('ytdl_options_overrides')
@@ -1008,9 +989,8 @@ def parse_download_options(post: dict) -> tuple[str, DownloadOptions]:
     ytdl_options_presets = _parse_ytdl_options_presets(post)
     ytdl_options_overrides = _parse_ytdl_options_overrides(
         ytdl_options_overrides,
-        enabled=config.ALLOW_YTDL_OPTIONS_OVERRIDES,
+        enabled=env_config.ALLOW_YTDL_OPTIONS_OVERRIDES,
     )
-    # Not stripped: passwords may legitimately contain leading/trailing spaces.
     if video_password == '':
         video_password = None
     if video_password is not None and not isinstance(video_password, str):
@@ -1032,9 +1012,7 @@ def parse_download_options(post: dict) -> tuple[str, DownloadOptions]:
     clip_end: float | None
     if download_type in ('captions', 'thumbnail'):
         if _clip_field_provided_in_post(clip_start_raw) or _clip_field_provided_in_post(clip_end_raw):
-            raise web.HTTPBadRequest(
-                reason='clip_start and clip_end are only supported for video and audio downloads',
-            )
+            raise web.HTTPBadRequest(reason='clip_start and clip_end are only supported for video and audio downloads')
         clip_start = None
         clip_end = None
     else:
@@ -1060,61 +1038,199 @@ def parse_download_options(post: dict) -> tuple[str, DownloadOptions]:
             raise web.HTTPBadRequest(reason='clip_end must be greater than clip_start')
 
     return url, DownloadOptions(
-        download_type=download_type,
-        codec=codec,
-        format=format,
-        quality=quality,
-        folder=folder,
-        custom_name_prefix=custom_name_prefix,
-        playlist_item_limit=playlist_item_limit,
-        auto_start=auto_start,
-        split_by_chapters=split_by_chapters,
-        sponsorblock=sponsorblock,
-        audio_tags=audio_tags,
-        chapter_template=chapter_template,
-        subtitle_language=subtitle_language,
-        subtitle_mode=subtitle_mode,
-        ytdl_options_presets=ytdl_options_presets,
-        ytdl_options_overrides=ytdl_options_overrides,
-        clip_start=clip_start,
-        clip_end=clip_end,
+        download_type=download_type, codec=codec, format=format, quality=quality,
+        folder=folder, custom_name_prefix=custom_name_prefix, playlist_item_limit=playlist_item_limit,
+        auto_start=auto_start, split_by_chapters=split_by_chapters, sponsorblock=sponsorblock,
+        audio_tags=audio_tags, chapter_template=chapter_template, subtitle_language=subtitle_language,
+        subtitle_mode=subtitle_mode, ytdl_options_presets=ytdl_options_presets,
+        ytdl_options_overrides=ytdl_options_overrides, clip_start=clip_start, clip_end=clip_end,
         video_password=video_password,
     )
 
+# Auth Endpoints
+
+@routes.get(config.URL_PREFIX + 'auth/me')
+async def auth_me(request):
+    user = request.get('auth_user')
+    return web.json_response({
+        'enabled': config.ENABLE_AUTH,
+        'authenticated': (not config.ENABLE_AUTH) or user is not None,
+        'user': user,
+    })
+
+@routes.post(config.URL_PREFIX + 'auth/login')
+async def auth_login(request):
+    if not config.ENABLE_AUTH:
+        return web.json_response({'status': 'ok', 'enabled': False})
+    try:
+        post = await request.json()
+    except Exception as exc:
+        raise web.HTTPBadRequest() from exc
+
+    username = str(post.get('username', '')).strip()
+    password = str(post.get('password', ''))
+    session_user = user_store.verify_credentials_session(username, password) if user_store is not None else None
+    if session_user is None:
+        return web.json_response({'status': 'error', 'msg': 'Invalid username or password.'}, status=401)
+
+    response_user = public_user_from_session_user(session_user)
+    response = web.json_response({'status': 'ok', 'user': response_user})
+    session_manager.set_cookie(response, session_user)
+    return response
+
+@routes.post(config.URL_PREFIX + 'auth/logout')
+async def auth_logout(request):
+    response = web.json_response({'status': 'ok'})
+    if config.ENABLE_AUTH and session_manager is not None:
+        session_manager.clear_cookie(response)
+    return response
+
+@routes.get(config.URL_PREFIX + 'auth/users')
+async def auth_users(request):
+    if not config.ENABLE_AUTH:
+        raise web.HTTPNotFound()
+    require_admin(request)
+    return web.json_response({'users': user_store.list_users()})
+
+@routes.post(config.URL_PREFIX + 'auth/users')
+async def auth_users_create(request):
+    if not config.ENABLE_AUTH:
+        raise web.HTTPNotFound()
+    require_admin(request)
+    try:
+        post = await request.json()
+    except Exception as exc:
+        raise web.HTTPBadRequest() from exc
+
+    username = str(post.get('username', '')).strip()
+    password = str(post.get('password', ''))
+    role = str(post.get('role', 'user')).strip().lower()
+    try:
+        user = user_store.create_user(username, password, role)
+    except ValueError as exc:
+        return web.json_response({'status': 'error', 'msg': str(exc)}, status=400)
+    return web.json_response({'status': 'ok', 'user': user}, status=201)
+
+async def invalidate_user_sessions(username):
+    if not config.ENABLE_AUTH or user_envs is None:
+        return
+    room = user_envs.room(username)
+    payload = serializer.encode({'username': username})
+    await sio.emit('session_invalidated', payload, to=room)
+
+@routes.delete(config.URL_PREFIX + 'auth/users/{username}')
+async def auth_users_delete(request):
+    if not config.ENABLE_AUTH:
+        raise web.HTTPNotFound()
+    admin_user = require_admin(request)
+    username = str(request.match_info.get('username', '')).strip()
+    if not username:
+        raise web.HTTPBadRequest(text='username is required')
+    if username == admin_user.get('username'):
+        return web.json_response({'status': 'error', 'msg': 'You cannot delete the currently logged-in account.'}, status=400)
+
+    delete_downloads_raw = request.query.get('delete_downloads', 'false')
+    try:
+        delete_downloads = coerce_optional_bool(delete_downloads_raw, False, 'delete_downloads')
+    except ValueError as exc:
+        return web.json_response({'status': 'error', 'msg': str(exc)}, status=400)
+
+    existing_env = user_envs.get_if_present(username) if user_envs is not None else None
+    if existing_env is not None and ((not existing_env['queue'].queue.empty()) or (not existing_env['queue'].pending.empty())):
+        return web.json_response(
+            {'status': 'error', 'msg': f"User '{username}' has active or pending downloads. Cancel or finish them before deletion."},
+            status=409,
+        )
+
+    try:
+        deleted_user = user_store.delete_user(username)
+    except (KeyError, ValueError) as exc:
+        return web.json_response({'status': 'error', 'msg': str(exc)}, status=404 if isinstance(exc, KeyError) else 400)
+
+    await invalidate_user_sessions(username)
+
+    if user_envs is not None:
+        paths = user_envs.user_paths(username)
+        await user_envs.remove(username)
+    else:
+        paths = {'download_dir': '', 'audio_download_dir': '', 'temp_dir': '', 'state_dir': ''}
+
+    if paths['state_dir']:
+        shutil.rmtree(paths['state_dir'], ignore_errors=True)
+
+    if delete_downloads:
+        for directory in set((paths['download_dir'], paths['audio_download_dir'], paths['temp_dir'])):
+            if directory:
+                shutil.rmtree(directory, ignore_errors=True)
+
+    return web.json_response({'status': 'ok', 'user': deleted_user, 'deleted_downloads': delete_downloads})
+
+@routes.post(config.URL_PREFIX + 'auth/users/{username}/password')
+async def auth_users_change_password(request):
+    if not config.ENABLE_AUTH:
+        raise web.HTTPNotFound()
+
+    actor = require_authenticated_user(request)
+    username = str(request.match_info.get('username', '')).strip()
+    if not username:
+        raise web.HTTPBadRequest(text='username is required')
+    try:
+        post = await request.json()
+    except Exception as exc:
+        raise web.HTTPBadRequest() from exc
+
+    new_password = str(post.get('new_password', ''))
+    current_password = str(post.get('current_password', ''))
+
+    is_admin = actor.get('role') == 'admin'
+    is_self = actor.get('username') == username
+    if (not is_admin) and (not is_self):
+        raise web.HTTPForbidden()
+
+    if (not is_admin) and is_self:
+        if not current_password:
+            return web.json_response({'status': 'error', 'msg': 'Current password is required.'}, status=400)
+        if not user_store.verify_user_password(username, current_password):
+            return web.json_response({'status': 'error', 'msg': 'Current password is incorrect.'}, status=401)
+
+    try:
+        updated_user = user_store.set_password(username, new_password)
+    except ValueError as exc:
+        return web.json_response({'status': 'error', 'msg': str(exc)}, status=400)
+    except KeyError as exc:
+        return web.json_response({'status': 'error', 'msg': str(exc)}, status=404)
+
+    await invalidate_user_sessions(username)
+
+    response = web.json_response({'status': 'ok', 'user': updated_user, 'force_relogin': actor.get('username') == username})
+    if actor.get('username') == username and session_manager is not None:
+        session_manager.clear_cookie(response)
+    return response
+
+# Main Action Endpoints
 
 @routes.post(config.URL_PREFIX + 'add')
 async def add(request):
     log.info("Received request to add download")
     post = await _read_json_request(request)
+    env = await env_for_request(request)
     try:
-        url, options = parse_download_options(post)
+        url, options = parse_download_options(post, env_config=env['config'])
     except web.HTTPBadRequest as e:
         log.error("Bad request: %s", e.reason)
         raise
-    log.info(
-        "Add download request: type=%s quality=%s format=%s has_folder=%s auto_start=%s",
-        options.download_type,
-        options.quality,
-        options.format,
-        bool(options.folder),
-        options.auto_start,
-    )
-    status = await dqueue.add(url, options)
+    log.info("Add download request: type=%s quality=%s format=%s", options.download_type, options.quality, options.format)
+    status = await env['queue'].add(url, options)
     return web.Response(text=serializer.encode(status))
-
 
 @routes.get(config.URL_PREFIX + 'formats')
 async def formats(request):
-    """The download options /add accepts, with labels; see format_catalog."""
-    return web.Response(
-        text=serializer.encode(format_catalog.public_catalog()),
-        content_type='application/json',
-    )
+    return web.Response(text=serializer.encode(format_catalog.public_catalog()), content_type='application/json')
 
 @routes.post(config.URL_PREFIX + 'browse')
 async def browse(request):
-    """Flat-probe a playlist/channel URL and list its entries; queues nothing."""
     post = await _read_json_request(request)
+    env = await env_for_request(request)
     url = str(post.get('url') or '').strip()
     if not url:
         raise web.HTTPBadRequest(reason="missing 'url'")
@@ -1122,47 +1238,37 @@ async def browse(request):
     _require_configured_presets(ytdl_options_presets)
     ytdl_options_overrides = _parse_ytdl_options_overrides(
         post.get('ytdl_options_overrides'),
-        enabled=config.ALLOW_YTDL_OPTIONS_OVERRIDES,
+        enabled=env['config'].ALLOW_YTDL_OPTIONS_OVERRIDES,
     )
-    playlist_item_limit = _playlist_item_limit_field(post)
-    log.info("Received request to browse playlist (item limit %s)", playlist_item_limit)
-    status = await browse_playlist(
-        config, url, playlist_item_limit, ytdl_options_presets, ytdl_options_overrides
-    )
+    playlist_item_limit = _playlist_item_limit_field(post, env_config=env['config'])
+    status = await browse_playlist(env['config'], url, playlist_item_limit, ytdl_options_presets, ytdl_options_overrides)
     return web.Response(text=serializer.encode(status))
-
 
 @routes.get(config.URL_PREFIX + 'presets')
 async def presets(request):
-    return web.Response(
-        text=serializer.encode({'presets': sorted(config.YTDL_OPTIONS_PRESETS.keys())}),
-        content_type='application/json',
-    )
+    return web.Response(text=serializer.encode({'presets': sorted(config.YTDL_OPTIONS_PRESETS.keys())}), content_type='application/json')
 
 @routes.post(config.URL_PREFIX + 'cancel-add')
 async def cancel_add(request):
-    dqueue.cancel_add()
+    env = await env_for_request(request)
+    env['queue'].cancel_add()
     return web.Response(text=serializer.encode({'status': 'ok'}), content_type='application/json')
-
 
 @routes.post(config.URL_PREFIX + 'retry')
 async def retry(request):
-    # Singular by design, unlike the 'ids' batch endpoints: a retry re-extracts
-    # the URL, so it can fail per item, and the caller removes that item's done
-    # record only once it is confirmed re-queued. A batch form would have to
-    # report per-id results for the caller to know which ones to remove.
     post = await _read_json_request(request)
-    status = await dqueue.retry(_require_id(post))
+    env = await env_for_request(request)
+    status = await env['queue'].retry(_require_id(post))
     return web.Response(text=serializer.encode(status), content_type='application/json')
-
 
 @routes.post(config.URL_PREFIX + 'subscribe')
 async def subscribe(request):
     post = await _read_json_request(request)
-    url, options = parse_download_options(post)
+    env = await env_for_request(request)
+    url, options = parse_download_options(post, env_config=env['config'])
     cic = post.get('check_interval_minutes')
     if cic is None:
-        cic = config.SUBSCRIPTION_DEFAULT_CHECK_INTERVAL
+        cic = env['config'].SUBSCRIPTION_DEFAULT_CHECK_INTERVAL
     try:
         cic = int(cic)
     except (TypeError, ValueError) as exc:
@@ -1171,20 +1277,11 @@ async def subscribe(request):
         raise web.HTTPBadRequest(reason='check_interval_minutes must be at least 1')
     skip_subscriber_only = _bool_field(post, 'skip_subscriber_only', False)
 
-    # A t= timestamp in the URL means "start playing here" and parse_download_options
-    # turns it into a clip start, which is right for a one-off download of that video.
-    # A subscription URL is a channel or playlist, so a timestamp left on it says
-    # nothing about the videos it will yield — honour clip fields only when the
-    # caller supplied them explicitly, rather than silently clipping every future
-    # download. The t= param is still stripped from the stored URL.
-    clip_given = (
-        _clip_field_provided_in_post(post.get('clip_start'))
-        or _clip_field_provided_in_post(post.get('clip_end'))
-    )
+    clip_given = _clip_field_provided_in_post(post.get('clip_start')) or _clip_field_provided_in_post(post.get('clip_end'))
     if not clip_given:
         options = options.replace(clip_start=None, clip_end=None)
 
-    result = await submgr.add_subscription(
+    result = await env['submgr'].add_subscription(
         url,
         check_interval_minutes=cic,
         download_type=options.download_type,
@@ -1210,49 +1307,42 @@ async def subscribe(request):
     )
     return web.Response(text=serializer.encode(result))
 
-
 @routes.get(config.URL_PREFIX + 'subscriptions')
 async def subscriptions_list(request):
-    return web.Response(text=serializer.encode([s.to_public_dict() for s in submgr.list_all()]))
-
+    env = await env_for_request(request)
+    return web.Response(text=serializer.encode([s.to_public_dict() for s in env['submgr'].list_all()]))
 
 @routes.post(config.URL_PREFIX + 'subscriptions/update')
 async def subscriptions_update(request):
     post = await _read_json_request(request)
+    env = await env_for_request(request)
     sub_id = post.get('id')
     if not sub_id:
         raise web.HTTPBadRequest(reason='missing subscription id')
-    changes = {
-        k: v
-        for k, v in post.items()
-        if k != 'id'
-        and k in ('enabled', 'check_interval_minutes', 'name', 'folder', 'title_regex', 'skip_subscriber_only')
-    }
+    changes = {k: v for k, v in post.items() if k != 'id' and k in ('enabled', 'check_interval_minutes', 'name', 'folder', 'title_regex', 'skip_subscriber_only')}
     if not changes:
         raise web.HTTPBadRequest(reason='no valid fields to update')
-    log.info("Subscription update requested for %s: %s", sub_id, sorted(changes.keys()))
-    result = await submgr.update_subscription(str(sub_id), changes)
+    result = await env['submgr'].update_subscription(str(sub_id), changes)
     return web.Response(text=serializer.encode(result))
-
 
 @routes.post(config.URL_PREFIX + 'subscriptions/delete')
 async def subscriptions_delete(request):
     post = await _read_json_request(request)
+    env = await env_for_request(request)
     ids = post.get('ids')
     if not ids or not isinstance(ids, list):
         raise web.HTTPBadRequest(reason='missing ids list')
-    result = await submgr.delete_subscriptions([str(i) for i in ids])
+    result = await env['submgr'].delete_subscriptions([str(i) for i in ids])
     return web.Response(text=serializer.encode(result))
-
 
 @routes.post(config.URL_PREFIX + 'subscriptions/check')
 async def subscriptions_check(request):
     post = await _read_json_request(request)
+    env = await env_for_request(request)
     ids = post.get('ids')
     if ids is not None and not isinstance(ids, list):
         raise web.HTTPBadRequest(reason='ids must be a list')
-    log.info("Subscription check-now requested for ids=%s", ids if ids else "all-enabled")
-    result = await submgr.check_now([str(i) for i in ids] if ids else None)
+    result = await env['submgr'].check_now([str(i) for i in ids] if ids else None)
     return web.Response(text=serializer.encode(result))
 
 def _require_id(post: dict) -> str:
@@ -1261,17 +1351,16 @@ def _require_id(post: dict) -> str:
         raise web.HTTPBadRequest(reason="'id' must be a non-empty string")
     return id
 
-
 def _require_id_list(post: dict) -> list:
     ids = post.get('ids')
     if not isinstance(ids, list) or not ids or not all(isinstance(i, str) for i in ids):
         raise web.HTTPBadRequest(reason="'ids' must be a non-empty list of strings")
     return ids
 
-
 @routes.post(config.URL_PREFIX + 'delete')
 async def delete(request):
     post = await _read_json_request(request)
+    env = await env_for_request(request)
     ids = _require_id_list(post)
     where = post.get('where')
     if where not in ['queue', 'done']:
@@ -1280,44 +1369,23 @@ async def delete(request):
     delete_files = post.get('delete_files', False)
     if not isinstance(delete_files, bool):
         raise web.HTTPBadRequest(reason="'delete_files' must be a boolean")
-    status = await (dqueue.cancel(ids) if where == 'queue' else dqueue.clear(ids, delete_files=delete_files))
-    log.info(f"Download delete request processed for ids: {ids}, where: {where}")
+    status = await (env['queue'].cancel(ids) if where == 'queue' else env['queue'].clear(ids, delete_files=delete_files))
     return web.Response(text=serializer.encode(status))
 
 @routes.post(config.URL_PREFIX + 'start')
 async def start(request):
     post = await _read_json_request(request)
+    env = await env_for_request(request)
     ids = _require_id_list(post)
-    log.info(f"Received request to start pending downloads for ids: {ids}")
-    status = await dqueue.start_pending(ids)
+    status = await env['queue'].start_pending(ids)
     return web.Response(text=serializer.encode(status))
-
 
 COOKIES_PATH = os.path.join(config.STATE_DIR, 'cookies.txt')
 
-
 def warn_if_cookiefile_shadowed():
-    """Warn before an uploaded cookies file displaces an operator-configured one.
-
-    Uploaded cookies deliberately win: the upload exists so cookies can be
-    refreshed without restarting the container, and letting YTDL_OPTIONS win
-    would leave a visible UI button doing nothing. But set_runtime_override
-    writes straight into YTDL_OPTIONS, so the configured path is gone from the
-    live config the moment an uploaded file is applied — after that, nothing
-    downstream can report the conflict (delete_cookies' has_manual_cookiefile
-    check cannot fire once the value has been replaced). This is the only point
-    where both are still visible, so it is the only place the warning can be
-    issued. Must be called before set_runtime_override. See issue #881, where
-    the silence cost the reporter days of debugging.
-    """
     configured = config.YTDL_OPTIONS.get('cookiefile')
     if isinstance(configured, str) and configured and configured != COOKIES_PATH:
-        log.warning(
-            'Uploaded cookies at %s take precedence over the cookiefile configured in '
-            'YTDL_OPTIONS (%s), which will not be used. Delete the uploaded cookies from '
-            'the UI to go back to the configured file.',
-            COOKIES_PATH, configured)
-
+        log.warning('Uploaded cookies at %s take precedence over the cookiefile configured in YTDL_OPTIONS (%s).', COOKIES_PATH, configured)
 
 @routes.post(config.URL_PREFIX + 'upload-cookies')
 async def upload_cookies(request):
@@ -1325,8 +1393,7 @@ async def upload_cookies(request):
     field = await reader.next()
     if field is None or field.name != 'cookies':
         return web.Response(status=400, text=serializer.encode({'status': 'error', 'msg': 'No cookies file provided'}))
-
-    max_size = 1_000_000  # 1MB limit
+    max_size = 1_000_000
     size = 0
     content = bytearray()
     while True:
@@ -1337,12 +1404,9 @@ async def upload_cookies(request):
         if size > max_size:
             return web.Response(status=400, text=serializer.encode({'status': 'error', 'msg': 'Cookie file too large (max 1MB)'}))
         content.extend(chunk)
-
     tmp_cookie_path = f"{COOKIES_PATH}.tmp"
     with open(tmp_cookie_path, 'wb') as f:
         f.write(content)
-    # Cookies are sensitive auth material; restrict to owner read/write only
-    # (the container's default umask would otherwise leave them group/world readable).
     try:
         os.chmod(tmp_cookie_path, 0o600)
     except OSError as exc:
@@ -1350,7 +1414,6 @@ async def upload_cookies(request):
     os.replace(tmp_cookie_path, COOKIES_PATH)
     warn_if_cookiefile_shadowed()
     config.set_runtime_override('cookiefile', COOKIES_PATH)
-    log.info(f'Cookies file uploaded ({size} bytes)')
     return web.Response(text=serializer.encode({'status': 'ok', 'msg': f'Cookies uploaded ({size} bytes)'}))
 
 @routes.post(config.URL_PREFIX + 'delete-cookies')
@@ -1358,26 +1421,15 @@ async def delete_cookies(request):
     has_uploaded_cookies = os.path.exists(COOKIES_PATH)
     configured_cookiefile = config.YTDL_OPTIONS.get('cookiefile')
     has_manual_cookiefile = isinstance(configured_cookiefile, str) and configured_cookiefile and configured_cookiefile != COOKIES_PATH
-
     if not has_uploaded_cookies:
         if has_manual_cookiefile:
-            return web.Response(
-                status=400,
-                text=serializer.encode({
-                    'status': 'error',
-                    'msg': 'Cookies are configured manually via YTDL_OPTIONS (cookiefile). Remove or change that setting manually; UI delete only removes uploaded cookies.'
-                })
-            )
+            return web.Response(status=400, text=serializer.encode({'status': 'error', 'msg': 'Cookies are configured manually via YTDL_OPTIONS.'}))
         return web.Response(status=400, text=serializer.encode({'status': 'error', 'msg': 'No uploaded cookies to delete'}))
-
     os.remove(COOKIES_PATH)
     config.remove_runtime_override('cookiefile')
     success, msg = config.load_ytdl_options()
     if not success:
-        log.error(f'Cookies file deleted, but failed to reload YTDL_OPTIONS: {msg}')
         return web.Response(status=500, text=serializer.encode({'status': 'error', 'msg': f'Cookies file deleted, but failed to reload YTDL_OPTIONS: {msg}'}))
-
-    log.info('Cookies file deleted')
     return web.Response(text=serializer.encode({'status': 'ok'}))
 
 @routes.get(config.URL_PREFIX + 'cookie-status')
@@ -1390,206 +1442,137 @@ async def cookie_status(request):
 
 @routes.get(config.URL_PREFIX + 'history')
 async def history(request):
+    env = await env_for_request(request)
     history = { 'done': [], 'queue': [], 'pending': []}
-
-    # Served from the in-memory queues (like the socket 'all' event) rather
-    # than saved_items(), which reloads and re-compacts the on-disk state on
-    # every call.
-    for _, v in dqueue.queue.items():
+    for _, v in env['queue'].queue.items():
         history['queue'].append(v.info)
-    for _, v in dqueue.done.items():
+    for _, v in env['queue'].done.items():
         history['done'].append(v.info)
-    for _, v in dqueue.pending.items():
+    for _, v in env['queue'].pending.items():
         history['pending'].append(v.info)
-
-    log.info("Sending download history")
     return web.Response(text=serializer.encode(history))
 
-async def _emit_connect_finish(sid):
-    """Slow connect-finish events, dispatched off the connect-ACK path.
-
-    The socket.io connect ACK is sent only after the ``connect`` handler
-    returns, so any work awaited there delays the handshake. ``get_custom_dirs()``
-    runs ``path.glob('**/')`` over the whole download tree (over 100s on a
-    large library) and ``get_options_update_time()`` touches the filesystem;
-    emitting them inline kept the client stuck on "Connecting..." long past the
-    engine.io ping window. Both are therefore dispatched as a background task
-    after the handler has returned, so the ACK is immediate and the client
-    connects instantly, receiving the directory list a moment later.
-    """
+async def _emit_connect_finish(sid, user_config):
     loop = asyncio.get_running_loop()
-    if config.CUSTOM_DIRS:
-        dirs = await loop.run_in_executor(None, get_custom_dirs)
+    if user_config.CUSTOM_DIRS:
+        dirs = await loop.run_in_executor(None, get_custom_dirs, user_config)
         await sio.emit('custom_dirs', serializer.encode(dirs), to=sid)
-    if config.YTDL_OPTIONS_FILE:
+    if user_config.YTDL_OPTIONS_FILE:
         options_update = await loop.run_in_executor(None, get_options_update_time)
         await sio.emit('ytdl_options_changed', serializer.encode(options_update), to=sid)
 
 @sio.event
 async def connect(sid, environ):
-    log.info(f"Client connected: {sid}")
-    # Gather + serialize on the event loop: ``dqueue.get()`` iterates the queue
-    # dicts and the encoder reads ``DownloadInfo`` objects the progress hooks
-    # are updating, so a worker thread risks ``RuntimeError: dictionary changed
-    # size during iteration`` (the client would get no ``all`` event). A ~53 KB
-    # payload serializes in milliseconds, so this costs nothing on the
-    # handshake -- ``_save_dict_async`` serializes on the loop for the same
-    # reason. 'all' goes out first: the UI populates its state from it before
-    # the finer-grained events that may follow.
-    await sio.emit('all', serializer.encode(dqueue.get()), to=sid)
-    await sio.emit('subscriptions_all', serializer.encode([s.to_public_dict() for s in submgr.list_all()]), to=sid)
+    user = None
+    if config.ENABLE_AUTH:
+        session_user = session_manager.user_from_environ(environ) if session_manager is not None else None
+        if session_user is not None and user_store is not None:
+            persisted_user = user_store.get_session_user(session_user['username'])
+            if persisted_user is not None and persisted_user.get('session_version') == session_user.get('session_version'):
+                user = public_user_from_session_user(persisted_user)
+        if user is None:
+            log.warning("Rejected unauthenticated socket connection: %s", sid)
+            return False
+        env = await user_envs.get(user['username'])
+        await sio.enter_room(sid, user_envs.room(user['username']))
+        log.info("Client connected: %s (%s)", sid, user['username'])
+    else:
+        env = {'queue': dqueue, 'submgr': submgr, 'config': config}
+        log.info("Client connected: %s", sid)
+
+    await sio.emit('all', serializer.encode(env['queue'].get()), to=sid)
+    await sio.emit('subscriptions_all', serializer.encode([s.to_public_dict() for s in env['submgr'].list_all()]), to=sid)
     await sio.emit('formats', serializer.encode(format_catalog.public_catalog()), to=sid)
-    await sio.emit('configuration', serializer.encode(config.frontend_safe()), to=sid)
-    # The slow directory / ytdl-options emits must NOT be awaited here: the
-    # connect ACK is sent only when this handler returns, so awaiting them
-    # would delay the handshake past the engine.io ping window. Dispatch them
-    # as a background task (strong-referenced, failures logged) so the ACK
-    # goes out immediately.
-    bg_tasks.create_task(_emit_connect_finish(sid), name=f"connect_finish_{sid}")
+    
+    cfg = env['config'].frontend_safe()
+    cfg['AUTH_ENABLED'] = config.ENABLE_AUTH
+    if user:
+        cfg['AUTH_USER'] = user
+    await sio.emit('configuration', serializer.encode(cfg), to=sid)
+    
+    bg_tasks.create_task(_emit_connect_finish(sid, env['config']), name=f"connect_finish_{sid}")
 
 _CUSTOM_DIRS_CACHE_TTL_SECONDS = 5
-# (key, time, value) of the last listing; a connect storm reuses it.
 _custom_dirs_cache = None
 
-
-def _list_subdirs(base: str) -> list[str]:
-    """Every directory under *base*, relative to it, minus the excluded ones.
-
-    '' (the base itself) comes first, and is listed even when the directory
-    is empty or does not exist yet. Paths are made relative with
-    Path.relative_to rather than by stripping *base* as a string prefix,
-    which with the default DOWNLOAD_DIR '.' also stripped the dot off
-    '.hidden', listing it as 'hidden' where the exclude pattern missed it.
-    """
+def _list_subdirs(base: str, exclude_re) -> list[str]:
     root = pathlib.Path(base)
-    exclude = config.CUSTOM_DIRS_EXCLUDE_RE
     dirs = ['']
     for path in root.glob('**/'):
         rel = path.relative_to(root).as_posix()
-        if rel == '.' or (exclude is not None and exclude.search(rel)):
+        if rel == '.' or (exclude_re is not None and exclude_re.search(rel)):
             continue
         dirs.append(rel)
     return dirs
 
-
-def get_custom_dirs():
+def get_custom_dirs(target_config):
     global _custom_dirs_cache
     now = time.monotonic()
-    key = (config.DOWNLOAD_DIR, config.AUDIO_DOWNLOAD_DIR, config.CUSTOM_DIRS_EXCLUDE_REGEX)
-    if (
-        _custom_dirs_cache is not None
-        and _custom_dirs_cache[0] == key
-        and now - _custom_dirs_cache[1] < _CUSTOM_DIRS_CACHE_TTL_SECONDS
-    ):
+    key = (target_config.DOWNLOAD_DIR, target_config.AUDIO_DOWNLOAD_DIR, target_config.CUSTOM_DIRS_EXCLUDE_REGEX)
+    if _custom_dirs_cache is not None and _custom_dirs_cache[0] == key and now - _custom_dirs_cache[1] < _CUSTOM_DIRS_CACHE_TTL_SECONDS:
         return _custom_dirs_cache[2]
-
-    download_dir = _list_subdirs(config.DOWNLOAD_DIR)
+    download_dir = _list_subdirs(target_config.DOWNLOAD_DIR, target_config.CUSTOM_DIRS_EXCLUDE_RE)
     audio_download_dir = download_dir
-    if config.DOWNLOAD_DIR != config.AUDIO_DOWNLOAD_DIR:
-        audio_download_dir = _list_subdirs(config.AUDIO_DOWNLOAD_DIR)
-
-    result = {
-        "download_dir": download_dir,
-        "audio_download_dir": audio_download_dir
-    }
+    if target_config.DOWNLOAD_DIR != target_config.AUDIO_DOWNLOAD_DIR:
+        audio_download_dir = _list_subdirs(target_config.AUDIO_DOWNLOAD_DIR, target_config.CUSTOM_DIRS_EXCLUDE_RE)
+    result = {"download_dir": download_dir, "audio_download_dir": audio_download_dir}
     _custom_dirs_cache = (key, now, result)
     return result
 
-@routes.get(config.URL_PREFIX)
-async def index(request):
-    response = web.FileResponse(os.path.join(config.BASE_DIR, 'ui/dist/metube/browser/index.html'))
-    if 'metube_theme' not in request.cookies:
-        response.set_cookie('metube_theme', config.DEFAULT_THEME)
-    return response
+def safe_file_response(base_directory, relative_path):
+    base_path = pathlib.Path(base_directory).resolve()
+    decoded_path = relative_path
+    candidate = (base_path / decoded_path).resolve()
+    try:
+        candidate.relative_to(base_path)
+    except ValueError as exc:
+        raise web.HTTPForbidden() from exc
+    if not candidate.is_file():
+        raise web.HTTPNotFound()
+    return web.FileResponse(candidate)
 
-@routes.get(config.URL_PREFIX + 'robots.txt')
-async def robots(request):
-    if config.ROBOTS_TXT:
-        response = web.FileResponse(os.path.join(config.BASE_DIR, config.ROBOTS_TXT))
-    else:
-        response = web.Response(
-            text="User-agent: *\nDisallow: /download/\nDisallow: /audio_download/\n"
-        )
-    return response
+if config.ENABLE_AUTH:
+    @routes.get(config.URL_PREFIX + 'download/{path:.*}')
+    async def download_file(request):
+        user = require_authenticated_user(request)
+        env = await user_envs.get(user['username'])
+        return safe_file_response(env['config'].DOWNLOAD_DIR, request.match_info.get('path', ''))
 
-@routes.get(config.URL_PREFIX + 'version')
-async def version(request):
-    return web.json_response({
-        "yt-dlp": yt_dlp_version,
-        "version": os.getenv("METUBE_VERSION", "dev")
-    })
+    @routes.get(config.URL_PREFIX + 'audio_download/{path:.*}')
+    async def audio_download_file(request):
+        user = require_authenticated_user(request)
+        env = await user_envs.get(user['username'])
+        return safe_file_response(env['config'].AUDIO_DOWNLOAD_DIR, request.match_info.get('path', ''))
+else:
+    routes.static(config.URL_PREFIX + 'download/', config.DOWNLOAD_DIR, show_index=config.DOWNLOAD_DIRS_INDEXABLE)
+    routes.static(config.URL_PREFIX + 'audio_download/', config.AUDIO_DOWNLOAD_DIR, show_index=config.DOWNLOAD_DIRS_INDEXABLE)
 
-if config.URL_PREFIX != '/':
-    @routes.get('/')
-    async def index_redirect_root(request):
-        return web.HTTPFound(config.URL_PREFIX)
-
-    @routes.get(config.URL_PREFIX[:-1])
-    async def index_redirect_dir(request):
-        return web.HTTPFound(config.URL_PREFIX)
-
-routes.static(config.URL_PREFIX + 'download/', config.DOWNLOAD_DIR, show_index=config.DOWNLOAD_DIRS_INDEXABLE)
-routes.static(config.URL_PREFIX + 'audio_download/', config.AUDIO_DOWNLOAD_DIR, show_index=config.DOWNLOAD_DIRS_INDEXABLE)
 routes.static(config.URL_PREFIX, os.path.join(config.BASE_DIR, 'ui/dist/metube/browser'))
 try:
     app.add_routes(routes)
 except ValueError as e:
     if 'ui/dist/metube/browser' in str(e):
-        raise RuntimeError('Could not find the frontend UI static assets. Please run `node_modules/.bin/ng build` inside the ui folder') from e
+        raise RuntimeError('Could not find the frontend UI static assets.') from e
     raise e
 
-# https://github.com/aio-libs/aiohttp/pull/4615 waiting for release
-# @routes.options(config.URL_PREFIX + 'add')
 async def add_cors(request):
     return web.Response(text=serializer.encode({"status": "ok"}))
 
-app.router.add_route('OPTIONS', config.URL_PREFIX + 'add', add_cors)
-app.router.add_route('OPTIONS', config.URL_PREFIX + 'browse', add_cors)
-app.router.add_route('OPTIONS', config.URL_PREFIX + 'cancel-add', add_cors)
-app.router.add_route('OPTIONS', config.URL_PREFIX + 'retry', add_cors)
-app.router.add_route('OPTIONS', config.URL_PREFIX + 'subscribe', add_cors)
-app.router.add_route('OPTIONS', config.URL_PREFIX + 'subscriptions', add_cors)
-app.router.add_route('OPTIONS', config.URL_PREFIX + 'subscriptions/update', add_cors)
-app.router.add_route('OPTIONS', config.URL_PREFIX + 'subscriptions/delete', add_cors)
-app.router.add_route('OPTIONS', config.URL_PREFIX + 'subscriptions/check', add_cors)
-app.router.add_route('OPTIONS', config.URL_PREFIX + 'upload-cookies', add_cors)
-app.router.add_route('OPTIONS', config.URL_PREFIX + 'delete-cookies', add_cors)
+for endpoint in ['add', 'browse', 'cancel-add', 'retry', 'subscribe', 'subscriptions', 'subscriptions/update', 'subscriptions/delete', 'subscriptions/check', 'upload-cookies', 'delete-cookies']:
+    app.router.add_route('OPTIONS', config.URL_PREFIX + endpoint, add_cors)
 
 async def on_prepare(request, response):
     origin = request.headers.get('Origin')
     if not origin or not _cors_origins:
         return
-
-    # Naming an origin in CORS_ALLOWED_ORIGINS is a deliberate trust grant, so
-    # such an origin may send credentials: the cookie or Authorization header
-    # that a reverse proxy in front of MeTube checks. Without this a bookmarklet
-    # cannot reach an authenticated instance at all (issue #155).
-    #
-    # The '*' wildcard is emphatically not such a grant — it matches origins the
-    # operator never enumerated, including every site the user happens to visit.
-    # Echoing the origin back (which we must do, since '*' is illegal alongside
-    # credentials) and allowing credentials would let any page drive the user's
-    # instance with the user's own session. So the wildcard keeps exactly the
-    # uncredentialed behaviour it has always had, and a wildcard anywhere in the
-    # list disables credentials for every origin in it.
-    #
-    # Derived here rather than held in a second module global so the wildcard
-    # test and the membership test can never disagree about the same list.
     wildcard = '*' in _cors_origins
     trusted = not wildcard and origin in _cors_origins
     if not (wildcard or trusted):
         return
-
     response.headers['Access-Control-Allow-Origin'] = origin
-    # Authorization rides on the same grant: allowing it under the wildcard
-    # would let an arbitrary page attempt credentials against an instance it
-    # can already reach, from inside the victim's network.
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization' if trusted else 'Content-Type'
     if trusted:
         response.headers['Access-Control-Allow-Credentials'] = 'true'
-
-    # The response now differs per Origin, so a shared cache must not hand one
-    # origin's Allow-Origin to another.
     vary = response.headers.get('Vary')
     if not vary:
         response.headers['Vary'] = 'Origin'
@@ -1599,19 +1582,12 @@ async def on_prepare(request, response):
 app.on_response_prepare.append(on_prepare)
 
 def isAccessLogEnabled():
-    if config.ENABLE_ACCESSLOG:
-        return access_logger
-    else:
-        return None
+    return access_logger if config.ENABLE_ACCESSLOG else None
 
 if __name__ == '__main__':
     logging.getLogger().setLevel(parseLogLevel(config.LOGLEVEL) or logging.INFO)
-    # An empty HOST binds every interface on both stacks; print the '*' spelling
-    # that selects it rather than a bare ':8081'.
     log.info(f"Listening on {config.HOST or '*'}:{config.PORT}")
 
-
-    # Auto-detect cookie file on startup
     if os.path.exists(COOKIES_PATH):
         warn_if_cookiefile_shadowed()
         config.set_runtime_override('cookiefile', COOKIES_PATH)
