@@ -1,6 +1,3 @@
-import { AuthService } from './services/auth.service';
-import { inject } from '@angular/core';
-import { AuthService } from './services/auth.service';
 import { AuthLoginComponent } from './components/auth-login.component';
 import { NgTemplateOutlet } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
@@ -1000,31 +997,5 @@ export class App implements AfterViewInit, OnInit, OnDestroy {
     this.completedDownloads = completed;
     this.failedDownloads = failed;
     this.totalSpeed = speed;
-  }
-}
-
-@Component({
-  selector: 'app-root',
-  imports: [
-    // ... existing imports
-    AuthLoginComponent
-  ],
-  // ...
-})
-export class App implements OnInit, AfterViewInit {
-  authService = inject(AuthService);
-  
-  ngOnInit() {
-    this.getConfiguration();
-    this.getYtdlOptionsUpdateTime();
-    // Wrap customDir logic so it fires after auth validates
-    this.authService.loadAuthStatus(() => {
-      if (this.authService.authEnabled.value && !this.authService.authenticated.value) {
-        this.downloads.loading = false;
-      } else {
-        this.customDirs$ = this.getMatchingCustomDir();
-      }
-    });
-    this.setTheme(this.activeTheme!);
   }
 }
