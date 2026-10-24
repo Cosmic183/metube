@@ -416,7 +416,7 @@ class GetCustomDirsTests(unittest.TestCase):
         # asyncio.get_running_loop().time(), which raises RuntimeError outside
         # a running loop (e.g. when called from a plain executor thread). It
         # must work from a synchronous context too.
-        result = main.get_custom_dirs({})
+        result = main.get_custom_dirs(main.config)
         self.assertIn("download_dir", result)
         self.assertIn("audio_download_dir", result)
         self.assertIn("", result["download_dir"])
