@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # pylint: disable=no-member,method-hidden
 
+import copy
+import shutil
+from auth import SessionManager, UserStore
+
 import os
 import sys
 import asyncio
