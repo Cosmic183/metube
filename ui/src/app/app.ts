@@ -2,7 +2,6 @@ import { AuthService } from './services/auth.service';
 import { AuthLoginComponent } from './components/auth-login.component';
 import { AuthAdminComponent } from './components/auth-admin.component';
 import { AsyncPipe } from '@angular/common';
-import { inject } from '@angular/core';
 import { NgTemplateOutlet } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
 import { AfterViewInit, ChangeDetectionStrategy, ChangeDetectorRef, Component, DestroyRef, viewChild, inject, OnDestroy, OnInit } from '@angular/core';
@@ -55,12 +54,15 @@ import {
         SubscriptionsSectionComponent,
         DownloadingSectionComponent,
         CompletedSectionComponent,
+        AuthLoginComponent,
+        AuthAdminComponent,
+        AsyncPipe
   ],
   templateUrl: './app.html',
   styleUrl: './app.sass',
 })
 export class App implements AfterViewInit, OnInit, OnDestroy {
-  authService = inject(AuthService);
+  authService: any = inject(AuthService);
   downloads = inject(DownloadsService);
   subscriptionsSvc = inject(SubscriptionsService);
   private toasts = inject(ToastService);
