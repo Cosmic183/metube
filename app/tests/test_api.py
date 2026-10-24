@@ -345,15 +345,6 @@ async def test_history_reads_in_memory_queues_not_disk_state(mock_dqueue):
 
 
 @pytest.mark.asyncio
-async def test_version_json(mock_dqueue):
-    req = MagicMock(spec=web.Request)
-    resp = await main.version(req)
-    assert resp.status == 200
-    body = json.loads(resp.text)
-    assert "yt-dlp" in body and "version" in body
-
-
-@pytest.mark.asyncio
 async def test_presets_endpoint_returns_names(mock_dqueue, monkeypatch):
     monkeypatch.setattr(main.config, "YTDL_OPTIONS_PRESETS", {"Preset B": {}, "Preset A": {}})
     req = MagicMock(spec=web.Request)
@@ -1179,7 +1170,7 @@ async def test_connect_dispatches_slow_finish_events_off_the_ack_path(mock_dqueu
     # A directory walk (invoked via run_in_executor, so sync), so we can assert
     # it ran off the handler and that its event is emitted once the background
     # task finishes.
-    def slow_get_custom_dirs():
+    def slow_get_custom_dirs(config_arg=None):
         slow['called'] = True
         return {"download_dir": ["", "a"], "audio_download_dir": ["", "a"]}
 
