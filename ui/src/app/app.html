@@ -10,7 +10,7 @@
       <span class="spacer"></span>
 
       <!-- AUTHENTICATION NAVIGATION (Visible only when logged in) -->
-      <ng-container *ngIf="authService.isAuthenticated$ | async">
+      @if (authService.isAuthenticated$ | async) {
         <span class="user-greeting">
           <mat-icon class="user-icon">account_circle</mat-icon>
           {{ (authService.authUser$ | async)?.username }}
@@ -19,7 +19,7 @@
           <mat-icon>exit_to_app</mat-icon>
           Logout
         </button>
-      </ng-container>
+      }
     </div>
   </mat-toolbar>
 
@@ -28,20 +28,22 @@
 
     <!-- 1. LOGIN SCREEN -->
     <!-- Displayed ONLY when the user is explicitly NOT authenticated -->
-    <!-- The strict '=== false' check satisfies the Angular linter -->
-    <div *ngIf="(authService.isAuthenticated$ | async) === false" class="auth-wrapper">
-      <app-auth-login></app-auth-login>
-    </div>
+    @if ((authService.isAuthenticated$ | async) === false) {
+      <div class="auth-wrapper">
+        <app-auth-login></app-auth-login>
+      </div>
+    }
 
     <!-- 2. PROTECTED APPLICATION AREA -->
     <!-- Hidden when the user is explicitly NOT authenticated -->
-    <!-- The strict '=== false' check satisfies the Angular linter -->
     <div [class.d-none]="(authService.isAuthenticated$ | async) === false" class="app-wrapper">
       
       <!-- ADMIN PANEL -->
-      <div class="admin-section" *ngIf="authService.isAdmin()">
-        <app-auth-admin></app-auth-admin>
-      </div>
+      @if (authService.isAdmin()) {
+        <div class="admin-section">
+          <app-auth-admin></app-auth-admin>
+        </div>
+      }
 
       <!-- CORE METUBE INTERFACE -->
       <div class="content-section">
