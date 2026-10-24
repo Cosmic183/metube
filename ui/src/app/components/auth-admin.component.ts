@@ -1,7 +1,7 @@
 import { Component, inject, OnInit } from '@angular/core';
 import { HttpClient, HttpErrorResponse, HttpParams } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
-import { AuthService, AuthUser, AuthResult } from '../services/auth.service';
+import { AuthService, AuthUser } from '../services/auth.service';
 
 @Component({
   selector: 'app-auth-admin',
