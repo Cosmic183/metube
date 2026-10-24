@@ -76,6 +76,7 @@ MeTube is configured with environment variables: `-e NAME=value` on the `docker 
 | `DEFAULT_FOLDER` | | Folder the field starts with, relative to the download directory. Requires `CUSTOM_DIRS`. |
 | `DOWNLOAD_DIRS_INDEXABLE` | `false` | Serve browsable listings of the download directories. |
 
+
 ### File naming
 
 Templates use [yt-dlp's output template syntax](https://github.com/yt-dlp/yt-dlp/blob/master/README.md#output-template). How MeTube applies them is explained in [Output templates](https://github.com/alexta69/metube/wiki/Output-templates).
