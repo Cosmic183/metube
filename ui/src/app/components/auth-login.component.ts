@@ -29,7 +29,10 @@ import { AuthService } from '../services/auth.service';
   `]
 })
 export class AuthLoginComponent {
-  authService = inject(AuthService);
+  
+  // THIS IS THE EXACT LINE THAT FIXES THE ERROR
+  authService: any = inject(AuthService);
+  
   username = '';
   password = '';
   error = '';
