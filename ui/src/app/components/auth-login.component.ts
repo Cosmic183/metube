@@ -1,8 +1,15 @@
 import { Component, inject } from '@angular/core';
-import { AuthService } from '../auth.service';
+import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
+import { MatFormFieldModule } from '@angular/material/form-field';
+import { MatInputModule } from '@angular/material/input';
+import { MatButtonModule } from '@angular/material/button';
+import { AuthService } from '../services/auth.service';
 
 @Component({
   selector: 'app-auth-login',
+  standalone: true,
+  imports: [CommonModule, FormsModule, MatFormFieldModule, MatInputModule, MatButtonModule],
   template: `
     <div class="login-container mat-elevation-z4">
       <h2>MeTube Login</h2>
@@ -32,19 +39,14 @@ import { AuthService } from '../auth.service';
 })
 export class AuthLoginComponent {
   authService = inject(AuthService);
-  
   username = '';
   password = '';
   error = '';
 
   login() {
     this.authService.login(this.username, this.password).subscribe({
-      next: () => {
-        this.error = '';
-      },
-      error: () => {
-        this.error = 'Invalid username or password.';
-      }
+      next: () => this.error = '',
+      error: () => this.error = 'Invalid username or password.'
     });
   }
 }
