@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -425,7 +426,8 @@ class GetCustomDirsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             for d in ("Music/Albums", ".hidden", "@eaDir", "Shows"):
                 os.makedirs(os.path.join(tmp, d))
-            dirs = main._list_subdirs(tmp, None)
+            exclude_re = re.compile(main.config.CUSTOM_DIRS_EXCLUDE_REGEX)
+            dirs = main._list_subdirs(tmp, exclude_re)
             self.assertEqual(dirs[0], "")
             self.assertEqual(sorted(dirs), ["", "Music", "Music/Albums", "Shows"])
             # The default DOWNLOAD_DIR is '.', and stripping it as a string
@@ -433,7 +435,7 @@ class GetCustomDirsTests(unittest.TestCase):
             cwd = os.getcwd()
             os.chdir(tmp)
             try:
-                self.assertEqual(sorted(main._list_subdirs(".", None)), ["", "Music", "Music/Albums", "Shows"])
+                self.assertEqual(sorted(main._list_subdirs(".", exclude_re)), ["", "Music", "Music/Albums", "Shows"])
             finally:
                 os.chdir(cwd)
 
