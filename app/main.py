@@ -6,6 +6,7 @@ import sys
 import asyncio
 import copy
 import shutil
+import pathlib
 from datetime import datetime, timedelta
 from pathlib import Path
 from aiohttp import web
