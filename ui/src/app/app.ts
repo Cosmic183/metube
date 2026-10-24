@@ -1,4 +1,3 @@
-import { AuthLoginComponent } from './components/auth-login.component';
 import { NgTemplateOutlet } from '@angular/common';
 import { HttpClient } from '@angular/common/http';
 import { AfterViewInit, ChangeDetectionStrategy, ChangeDetectorRef, Component, DestroyRef, viewChild, inject, OnDestroy, OnInit } from '@angular/core';
