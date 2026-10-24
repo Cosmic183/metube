@@ -1,4 +1,4 @@
-import { Component } from '@angular/core';
+import { Component, inject } from '@angular/core';
 import { AuthService } from '../auth.service';
 
 @Component({
@@ -18,7 +18,9 @@ import { AuthService } from '../auth.service';
           <input matInput type="password" [(ngModel)]="password" (keyup.enter)="login()">
         </mat-form-field>
       </div>
-      <div class="error-message" *ngIf="error">{{ error }}</div>
+      @if (error) {
+        <div class="error-message">{{ error }}</div>
+      }
       <button mat-raised-button color="primary" (click)="login()" [disabled]="!username || !password">Login</button>
     </div>
   `,
@@ -29,18 +31,18 @@ import { AuthService } from '../auth.service';
   `]
 })
 export class AuthLoginComponent {
+  authService = inject(AuthService);
+  
   username = '';
   password = '';
   error = '';
 
-  constructor(public authService: AuthService) {}
-
   login() {
     this.authService.login(this.username, this.password).subscribe({
-      next: (res: unknown) => {
+      next: () => {
         this.error = '';
       },
-      error: (err: unknown) => {
+      error: () => {
         this.error = 'Invalid username or password.';
       }
     });
