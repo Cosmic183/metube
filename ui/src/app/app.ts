@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { AuthService } from './services/auth.service';
 import { AuthLoginComponent } from './components/auth-login.component';
 import { AuthAdminComponent } from './components/auth-admin.component';
