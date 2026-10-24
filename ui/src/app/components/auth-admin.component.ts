@@ -237,7 +237,7 @@ export class AuthAdminComponent implements OnInit {
     }
 
     this.userCreateInProgress = true;
-    this.http.post<unknown>('auth/users', {
+    this.http.post<any>('auth/users', {
       username: this.newUsername.trim(),
       password: this.newPassword,
       role: this.newUserRole
@@ -305,7 +305,7 @@ export class AuthAdminComponent implements OnInit {
 
     this.deletingUsers.add(username);
     const params = new HttpParams().set('delete_downloads', this.deleteUserWithDownloads ? 'true' : 'false');
-    this.http.delete<unknown>(`auth/users/${encodeURIComponent(username)}`, { params }).subscribe({
+    this.http.delete<any>(`auth/users/${encodeURIComponent(username)}`, { params }).subscribe({
       next: (result) => {
         if (result.status === 'ok') {
           const dataText = result.deleted_downloads ? 'with downloads removed' : 'with downloads kept';
@@ -399,7 +399,7 @@ export class AuthAdminComponent implements OnInit {
 
     const username = this.passwordTargetUser.username;
     this.passwordInProgress = true;
-    this.http.post<unknown>(`auth/users/${encodeURIComponent(username)}/password`, body).subscribe({
+    this.http.post<any>(`auth/users/${encodeURIComponent(username)}/password`, body).subscribe({
       next: (result) => {
         if (result.status === 'ok') {
           if (result.force_relogin) {
