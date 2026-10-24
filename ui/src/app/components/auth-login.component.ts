@@ -1,40 +1,31 @@
 import { Component, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { MatFormFieldModule } from '@angular/material/form-field';
-import { MatInputModule } from '@angular/material/input';
-import { MatButtonModule } from '@angular/material/button';
 import { AuthService } from '../services/auth.service';
 
 @Component({
   selector: 'app-auth-login',
   standalone: true,
-  imports: [CommonModule, FormsModule, MatFormFieldModule, MatInputModule, MatButtonModule],
+  imports: [CommonModule, FormsModule],
   template: `
-    <div class="login-container mat-elevation-z4">
+    <div class="login-container">
       <h2>MeTube Login</h2>
-      <div class="form-group">
-        <mat-form-field appearance="fill" class="full-width">
-          <mat-label>Username</mat-label>
-          <input matInput [(ngModel)]="username" (keyup.enter)="login()">
-        </mat-form-field>
+      <div class="form-group mb-3">
+        <label>Username</label>
+        <input class="form-control" [(ngModel)]="username" (keyup.enter)="login()">
       </div>
-      <div class="form-group">
-        <mat-form-field appearance="fill" class="full-width">
-          <mat-label>Password</mat-label>
-          <input matInput type="password" [(ngModel)]="password" (keyup.enter)="login()">
-        </mat-form-field>
+      <div class="form-group mb-3">
+        <label>Password</label>
+        <input class="form-control" type="password" [(ngModel)]="password" (keyup.enter)="login()">
       </div>
       @if (error) {
-        <div class="error-message">{{ error }}</div>
+        <div class="text-danger mb-3">{{ error }}</div>
       }
-      <button mat-raised-button color="primary" (click)="login()" [disabled]="!username || !password">Login</button>
+      <button class="btn btn-primary w-100" (click)="login()" [disabled]="!username || !password">Login</button>
     </div>
   `,
   styles: [`
-    .login-container { max-width: 400px; margin: 4rem auto; padding: 2rem; border-radius: 8px; text-align: center; background: var(--card-background-color, #fff); }
-    .full-width { width: 100%; margin-bottom: 1rem; }
-    .error-message { color: #f44336; margin-bottom: 1rem; font-weight: 500; }
+    .login-container { max-width: 400px; margin: 4rem auto; padding: 2rem; border-radius: 8px; text-align: center; background: var(--bs-body-bg); box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
   `]
 })
 export class AuthLoginComponent {
