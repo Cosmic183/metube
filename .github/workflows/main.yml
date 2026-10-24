@@ -85,8 +85,8 @@ jobs:
           build-args: |
             VERSION=${{ steps.date.outputs.date }}
           tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ steps.date.outputs.date }}
+            ghcr.io/cosmic183/metube:latest
+            ghcr.io/cosmic183/metube:${{ steps.date.outputs.date }}
 
   dockerhub-sync-readme:
     needs: dockerhub-build-push
@@ -148,7 +148,7 @@ jobs:
         id: release_body
         env:
           DOCKERHUB_REPO: ${{ secrets.DOCKERHUB_REPOSITORY }}
-          GHCR_REPO: ghcr.io/${{ github.repository }}
+          GHCR_REPO: ghcr.io/cosmic183/metube
           DATE: ${{ steps.date.outputs.date }}
           HAS_COMMITS: ${{ steps.commits.outputs.has_commits }}
           COMMITS: ${{ steps.commits.outputs.commits }}
