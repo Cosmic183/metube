@@ -416,7 +416,7 @@ class GetCustomDirsTests(unittest.TestCase):
         # asyncio.get_running_loop().time(), which raises RuntimeError outside
         # a running loop (e.g. when called from a plain executor thread). It
         # must work from a synchronous context too.
-        result = main.get_custom_dirs()
+        result = main.get_custom_dirs({})
         self.assertIn("download_dir", result)
         self.assertIn("audio_download_dir", result)
         self.assertIn("", result["download_dir"])
@@ -425,7 +425,7 @@ class GetCustomDirsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             for d in ("Music/Albums", ".hidden", "@eaDir", "Shows"):
                 os.makedirs(os.path.join(tmp, d))
-            dirs = main._list_subdirs(tmp)
+            dirs = main._list_subdirs(tmp, None)
             self.assertEqual(dirs[0], "")
             self.assertEqual(sorted(dirs), ["", "Music", "Music/Albums", "Shows"])
             # The default DOWNLOAD_DIR is '.', and stripping it as a string
@@ -433,12 +433,12 @@ class GetCustomDirsTests(unittest.TestCase):
             cwd = os.getcwd()
             os.chdir(tmp)
             try:
-                self.assertEqual(sorted(main._list_subdirs(".")), ["", "Music", "Music/Albums", "Shows"])
+                self.assertEqual(sorted(main._list_subdirs(".", None)), ["", "Music", "Music/Albums", "Shows"])
             finally:
                 os.chdir(cwd)
 
     def test_missing_base_still_offers_the_base_itself(self):
-        self.assertEqual(main._list_subdirs("/nonexistent/metube-test"), [""])
+        self.assertEqual(main._list_subdirs("/nonexistent/metube-test", None), [""])
 
 
 if __name__ == "__main__":
