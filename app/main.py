@@ -1548,6 +1548,14 @@ else:
     routes.static(config.URL_PREFIX + 'download/', config.DOWNLOAD_DIR, show_index=config.DOWNLOAD_DIRS_INDEXABLE)
     routes.static(config.URL_PREFIX + 'audio_download/', config.AUDIO_DOWNLOAD_DIR, show_index=config.DOWNLOAD_DIRS_INDEXABLE)
 
+@routes.get(config.URL_PREFIX)
+@routes.get(config.URL_PREFIX + '/')
+async def index(request):
+    response = web.FileResponse(os.path.join(config.BASE_DIR, 'ui/dist/metube/browser/index.html'))
+    if 'metube_theme' not in request.cookies:
+        response.set_cookie('metube_theme', config.DEFAULT_THEME)
+    return response
+
 routes.static(config.URL_PREFIX, os.path.join(config.BASE_DIR, 'ui/dist/metube/browser'))
 try:
     app.add_routes(routes)
