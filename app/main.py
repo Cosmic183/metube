@@ -366,7 +366,6 @@ _AUTH_PROTECTED_EXACT_PATHS = {
 _AUTH_PROTECTED_PREFIX_PATHS = (
     _route_with_prefix('download/'),
     _route_with_prefix('audio_download/'),
-    _route_with_prefix('socket.io'),
     _route_with_prefix('auth/users/'),
 )
 
@@ -1471,9 +1470,14 @@ async def connect(sid, environ):
             persisted_user = user_store.get_session_user(session_user['username'])
             if persisted_user is not None and persisted_user.get('session_version') == session_user.get('session_version'):
                 user = public_user_from_session_user(persisted_user)
+        
         if user is None:
-            log.warning("Rejected unauthenticated socket connection: %s", sid)
-            return False
+            log.info("Unauthenticated client connected (needs login): %s", sid)
+            cfg = config.frontend_safe()
+            cfg['AUTH_ENABLED'] = config.ENABLE_AUTH
+            await sio.emit('configuration', serializer.encode(cfg), to=sid)
+            return True
+            
         env = await user_envs.get(user['username'])
         await sio.enter_room(sid, user_envs.room(user['username']))
         log.info("Client connected: %s (%s)", sid, user['username'])
