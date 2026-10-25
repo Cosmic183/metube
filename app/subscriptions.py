@@ -75,6 +75,12 @@ def _build_ydl_params(
         # get those files rewritten on every check interval. See issue #1040.
         "allow_playlist_files": False,
     }
+    # Leave YouTube's hidden private/deleted placeholders out of the scan. A
+    # video added to a playlist while still private would otherwise be marked
+    # seen, fail to download, and never be queued once it is published. Left
+    # out, it is simply new on the first check after it goes public (#1105).
+    # Added to, not replacing, any compat_opts the user configured.
+    params["compat_opts"] = set(params.get("compat_opts") or ()) | {"no-youtube-unavailable-videos"}
     params = _impersonate_opt(params)
     if playlistend is not None and playlistend > 0:
         params["playlistend"] = playlistend
@@ -96,6 +102,16 @@ def _is_media_entry(entry: Any) -> bool:
     if any(token in ie_key for token in ("playlist", "channel", "tab")):
         return any(entry.get(field) is not None for field in _MEDIA_HINT_FIELDS)
     return True
+
+
+def unexpected_ytdl_error(exc: Exception) -> str:
+    """The user-facing message for an exception yt-dlp let escape unwrapped.
+
+    yt-dlp only wraps its own failures in YoutubeDLError; an extractor bug
+    (a bare AttributeError, say) comes out as-is (#1108). Callers log the
+    traceback and report this instead of letting the exception through.
+    """
+    return f"Unexpected yt-dlp error: {type(exc).__name__}: {exc} (see the server log)"
 
 
 def extract_flat_playlist(
@@ -197,6 +213,9 @@ async def browse_playlist(
         )
     except yt_dlp.utils.YoutubeDLError as exc:
         return {"status": "error", "msg": str(exc)}
+    except Exception as exc:
+        log.exception("yt-dlp crashed browsing %s", url)
+        return {"status": "error", "msg": unexpected_ytdl_error(exc)}
 
     if not info:
         return {"status": "error", "msg": "Could not resolve URL"}
@@ -229,6 +248,60 @@ def _entry_id(entry: dict) -> Optional[str]:
         return str(eid)
     url = _entry_video_url(entry)
     return url
+
+
+def is_channel_extraction(feed: dict) -> bool:
+    """Return True when yt-dlp reported a channel as a playlist.
+
+    A channel *tab* -- ``/channel/UC...``, ``/@handle/videos``, and the
+    streams, shorts and playlists tabs -- is extracted with ``id`` equal to
+    ``channel_id``. A channel addressed without a tab keeps the form it was
+    asked for instead: ``@handle`` for a handle URL and the vanity name for
+    a legacy ``/c/`` URL. Both of those match ``uploader_id``, which is the
+    handle either way, so compare against it as well.
+
+    A real playlist has an id of its own and matches neither, even though
+    it also carries its owner's ``channel_id``.
+    """
+    channel_id = feed.get("channel_id")
+    feed_id = feed.get("id")
+    if not channel_id or not feed_id:
+        return False
+    if feed_id == channel_id:
+        return True
+    uploader_id = feed.get("uploader_id")
+    if not uploader_id:
+        return False
+    # Compared without case because a legacy vanity name and the handle it
+    # became need not agree on it. No playlist id can collide here: those
+    # are 'PL...', 'OLAK...' and the like, never a handle.
+    handle = uploader_id.casefold()
+    feed_id = feed_id.casefold()
+    return handle in (feed_id, f"@{feed_id}")
+
+
+def annotate_feed_entry(entry: dict, feed: dict, etype: str, index: int, total_entries: int) -> None:
+    """Copy a playlist's or channel's context onto one of its flat entries.
+
+    A flat scan leaves the entries without it, and the download queue picks
+    OUTPUT_TEMPLATE_PLAYLIST / OUTPUT_TEMPLATE_CHANNEL (and fills their
+    ``%(playlist_title)s``-style fields) from these keys. ``etype`` is
+    ``"playlist"`` or ``"channel"``; ``index`` is 1-based.
+    """
+    if etype == "channel":
+        entry["channel"] = feed.get("channel") or feed.get("uploader") or feed.get("title") or feed.get("id")
+    else:
+        entry["playlist"] = feed.get("id") or feed.get("channel_id") or feed.get("channel")
+    entry[f"{etype}_index"] = f"{index:0{len(str(total_entries))}d}"
+    entry[f"{etype}_count"] = total_entries
+    entry[f"{etype}_autonumber"] = index
+    # n_entries: standard yt-dlp field for total count (used by template engine)
+    # __last_playlist_index: yt-dlp internal field for auto-padding autonumber
+    entry["n_entries"] = total_entries
+    entry["__last_playlist_index"] = total_entries
+    for prop in ("id", "title", "uploader", "uploader_id"):
+        if prop in feed:
+            entry[f"{etype}_{prop}"] = feed[prop]
 
 
 def _is_subscriber_only_entry(entry: dict) -> bool:
@@ -751,6 +824,9 @@ class SubscriptionManager:
                 )
             except yt_dlp.utils.YoutubeDLError as exc:
                 return {"status": "error", "msg": str(exc)}
+            except Exception as exc:
+                log.exception("yt-dlp crashed scanning %s", url)
+                return {"status": "error", "msg": unexpected_ytdl_error(exc)}
 
             if not info:
                 return {"status": "error", "msg": "Could not resolve URL"}
@@ -988,6 +1064,13 @@ class SubscriptionManager:
             log.warning("Subscription check failed for %s: %s", sub.name, exc)
             await self.notifier.subscription_updated(sub)
             return
+        except Exception as exc:
+            # Recorded like any failed check, so the subscription shows the
+            # error and waits its interval instead of retrying every tick.
+            log.exception("yt-dlp crashed checking subscription %s", sub.name)
+            sub = await self._record_check(sid, error=unexpected_ytdl_error(exc)) or sub
+            await self.notifier.subscription_updated(sub)
+            return
         entries = [ent for ent in entries if _is_media_entry(ent)]
 
         etype = (info or {}).get("_type") or "video"
@@ -1001,6 +1084,12 @@ class SubscriptionManager:
             log.warning("Subscription check finished for %s: No entries found", sub.name)
             await self.notifier.subscription_updated(sub)
             return
+        if etype in ("playlist", "channel"):
+            # The same context an Add of this feed gives its items, so queued
+            # items get OUTPUT_TEMPLATE_PLAYLIST/CHANNEL as they would there.
+            feed_type = "channel" if etype == "channel" or is_channel_extraction(info) else "playlist"
+            for index, ent in enumerate(entries, start=1):
+                annotate_feed_entry(ent, info, feed_type, index, len(entries))
 
         async with self._lock:
             cur = self._subs.get(sid)

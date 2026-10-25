@@ -368,6 +368,72 @@ class SubscriptionPersistenceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sub.error, "queue failed")
             self.assertEqual(sub.seen_ids, ["v1"])
 
+    async def test_extractor_crash_is_recorded_as_a_failed_check(self):
+        # #1108: an extractor bug escapes yt-dlp unwrapped. Unrecorded, the
+        # subscription kept no error and was re-checked on every tick.
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = SubscriptionManager(_Config(tmp), _Queue(), _Notifier())
+            with patch(
+                "subscriptions.extract_flat_playlist",
+                side_effect=[
+                    (
+                        {"_type": "channel", "title": "Channel"},
+                        [{"id": "v1", "title": "One", "webpage_url": "https://example.com/v1"}],
+                    ),
+                    AttributeError("'NoneType' object has no attribute 'strip'"),
+                ],
+            ):
+                result = await mgr.add_subscription(
+                    "https://example.com/channel",
+                    check_interval_minutes=60,
+                    download_type="video",
+                    codec="auto",
+                    format="any",
+                    quality="best",
+                    folder="",
+                    custom_name_prefix="",
+                    auto_start=True,
+                    playlist_item_limit=0,
+                    split_by_chapters=False,
+                    chapter_template="",
+                    subtitle_language="en",
+                    subtitle_mode="prefer_manual",
+                )
+                before = time.time()
+                await mgr.check_now([result["subscription"]["id"]])
+
+            sub = mgr.list_all()[0]
+            self.assertIn("has no attribute 'strip'", sub.error)
+            self.assertGreaterEqual(sub.last_checked, before)
+            self.assertEqual(sub.seen_ids, ["v1"])
+
+    async def test_extractor_crash_fails_the_subscribe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = SubscriptionManager(_Config(tmp), _Queue(), _Notifier())
+            with patch(
+                "subscriptions.extract_flat_playlist",
+                side_effect=AttributeError("'NoneType' object has no attribute 'strip'"),
+            ):
+                result = await mgr.add_subscription(
+                    "https://example.com/channel",
+                    check_interval_minutes=60,
+                    download_type="video",
+                    codec="auto",
+                    format="any",
+                    quality="best",
+                    folder="",
+                    custom_name_prefix="",
+                    auto_start=True,
+                    playlist_item_limit=0,
+                    split_by_chapters=False,
+                    chapter_template="",
+                    subtitle_language="en",
+                    subtitle_mode="prefer_manual",
+                )
+            self.assertEqual(result["status"], "error")
+            self.assertIn("has no attribute 'strip'", result["msg"])
+            self.assertEqual(mgr.list_all(), [])
+
     async def test_repeated_queue_errors_are_reported_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             queue = _Queue()
@@ -1564,6 +1630,127 @@ class SubscriptionScanExtraOptsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(check_captured)
         self.assertEqual(check_captured[0].get("cookiefile"), "preset.txt")
 
+    async def test_scan_leaves_out_unavailable_videos_keeping_user_compat_opts(self):
+        """A video added to a playlist while still private is listed by the
+        scan, marked seen, fails to download, and is never queued once it is
+        published. yt-dlp's compat option keeps it out of the listing instead,
+        so it is new on the first check after it goes public. Issue #1105."""
+        captured_params: list = []
+        fake_ydl = _make_scan_capturing_fake_ydl(
+            captured_params,
+            [{"id": "v1", "title": "One", "webpage_url": "https://example.com/v1"}],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = _Config(tmp)
+            cfg.YTDL_OPTIONS = {"compat_opts": ["no-live-chat"]}
+            cfg.YTDL_OPTIONS_PRESETS = {"mypreset": {"compat_opts": ["playlist-index"]}}
+            mgr = SubscriptionManager(cfg, _Queue(), _Notifier())
+
+            with patch("subscriptions.yt_dlp.YoutubeDL", fake_ydl, create=True):
+                await mgr.add_subscription(
+                    "https://example.com/channel",
+                    check_interval_minutes=60,
+                    download_type="video",
+                    codec="auto",
+                    format="any",
+                    quality="best",
+                    folder="",
+                    custom_name_prefix="",
+                    auto_start=True,
+                    playlist_item_limit=0,
+                    split_by_chapters=False,
+                    chapter_template="",
+                    subtitle_language="en",
+                    subtitle_mode="prefer_manual",
+                    ytdl_options_presets=["mypreset"],
+                )
+
+        self.assertTrue(captured_params)
+        self.assertEqual(
+            set(captured_params[0]["compat_opts"]),
+            {"playlist-index", "no-youtube-unavailable-videos"},
+        )
+        # The configured options themselves are left untouched.
+        self.assertEqual(cfg.YTDL_OPTIONS["compat_opts"], ["no-live-chat"])
+
+
+class SubscriptionFeedContextTests(unittest.IsolatedAsyncioTestCase):
+    """Issue #1106: queued subscription items carry the playlist/channel
+    context an Add of the same feed gives them, so OUTPUT_TEMPLATE_PLAYLIST and
+    OUTPUT_TEMPLATE_CHANNEL apply to them too."""
+
+    async def _check_and_queue(self, info: dict) -> list[dict]:
+        def scan(first_ids):
+            return (
+                dict(info),
+                [
+                    {"id": vid, "title": vid.upper(), "webpage_url": f"https://example.com/{vid}"}
+                    for vid in first_ids
+                ],
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            queue = _Queue()
+            mgr = SubscriptionManager(_Config(tmp), queue, _Notifier())
+            with patch(
+                "subscriptions.extract_flat_playlist",
+                side_effect=[scan(["v1"]), scan(["v2", "v1"])],
+            ):
+                result = await mgr.add_subscription(
+                    "https://example.com/feed",
+                    check_interval_minutes=60,
+                    download_type="video",
+                    codec="auto",
+                    format="any",
+                    quality="best",
+                    folder="",
+                    custom_name_prefix="",
+                    auto_start=True,
+                    playlist_item_limit=0,
+                    split_by_chapters=False,
+                    chapter_template="",
+                    subtitle_language="en",
+                    subtitle_mode="prefer_manual",
+                )
+                await mgr.check_now([result["subscription"]["id"]])
+        return [entry for entry, _, _ in queue.entries]
+
+    async def test_playlist_items_carry_playlist_context(self):
+        queued = await self._check_and_queue({
+            "_type": "playlist",
+            "id": "PL123",
+            "title": "My List",
+            "channel_id": "UCowner",
+            "uploader": "Owner",
+        })
+
+        self.assertEqual(len(queued), 1)
+        entry = queued[0]
+        self.assertEqual(entry["id"], "v2")
+        self.assertEqual(entry["playlist"], "PL123")
+        self.assertEqual(entry["playlist_title"], "My List")
+        self.assertEqual(entry["playlist_index"], "1")
+        self.assertEqual(entry["playlist_count"], 2)
+        self.assertEqual(entry["n_entries"], 2)
+        self.assertNotIn("channel_index", entry)
+
+    async def test_channel_items_carry_channel_context(self):
+        queued = await self._check_and_queue({
+            "_type": "playlist",
+            "id": "UCchan",
+            "channel_id": "UCchan",
+            "channel": "Some Channel",
+            "title": "Some Channel - Videos",
+        })
+
+        self.assertEqual(len(queued), 1)
+        entry = queued[0]
+        self.assertEqual(entry["channel"], "Some Channel")
+        self.assertEqual(entry["channel_index"], "1")
+        self.assertEqual(entry["channel_count"], 2)
+        self.assertNotIn("playlist_index", entry)
+
 
 class BrowsePlaylistTests(unittest.IsolatedAsyncioTestCase):
     """browse_playlist is a read-only flat probe backing the Browse dialog."""
@@ -1672,6 +1859,12 @@ class BrowsePlaylistTests(unittest.IsolatedAsyncioTestCase):
         result, _ = await self._browse(extract)
         self.assertEqual(result["status"], "error")
         self.assertIn("boom", result["msg"])
+
+    async def test_extractor_crash_becomes_error_status(self):
+        extract = MagicMock(side_effect=AttributeError("'NoneType' object has no attribute 'strip'"))
+        result, _ = await self._browse(extract)
+        self.assertEqual(result["status"], "error")
+        self.assertIn("has no attribute 'strip'", result["msg"])
 
     async def test_unresolvable_url(self):
         extract = MagicMock(return_value=(None, []))
