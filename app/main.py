@@ -1475,7 +1475,12 @@ async def connect(sid, environ):
             log.info("Unauthenticated client connected (needs login): %s", sid)
             cfg = config.frontend_safe()
             cfg['AUTH_ENABLED'] = config.ENABLE_AUTH
+            
+            await sio.emit('all', serializer.encode({}), to=sid)
+            await sio.emit('subscriptions_all', serializer.encode([]), to=sid)
+            await sio.emit('formats', serializer.encode(format_catalog.public_catalog()), to=sid)
             await sio.emit('configuration', serializer.encode(cfg), to=sid)
+            
             return True
             
         env = await user_envs.get(user['username'])
