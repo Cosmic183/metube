@@ -88,20 +88,6 @@ jobs:
             ghcr.io/cosmic183/metube:latest
             ghcr.io/cosmic183/metube:${{ steps.date.outputs.date }}
 
-  dockerhub-sync-readme:
-    needs: dockerhub-build-push
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Sync README and short description
-        uses: peter-evans/dockerhub-description@v5
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_PASSWORD }}
-          repository: ${{ secrets.DOCKERHUB_REPOSITORY }}
-          short-description: ${{ github.event.repository.description }}
-
   create-release:
     needs: dockerhub-build-push
     runs-on: ubuntu-latest
