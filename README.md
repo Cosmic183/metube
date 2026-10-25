@@ -1,3 +1,5 @@
+> **NOTE:** This fork adds multi-user authentication to MeTube (credit to [MikaelKW](https://github.com/MikaelKW/metube) for the original implementation). The goal of this repository is to seamlessly receive all updates from the main branch while keeping the custom multi-user features intact. Please see the **Authentication & Users** section below for details on the required configuration variables.
+
 # MeTube
 
 ![Build Status](https://github.com/alexta69/metube/actions/workflows/main.yml/badge.svg)
@@ -38,6 +40,50 @@ Then open `http://<host>:8081` in your browser. Images are multi-arch (amd64/arm
 ## Configuration
 
 MeTube is configured with environment variables: `-e NAME=value` on the `docker run` command line, or the `environment:` section in Compose. Defaults are the Docker image's; outside Docker, the directories default to the working directory.
+
+### 🔒 Authentication & Users
+
+* `ENABLE_AUTH`: Enables built-in username/password authentication. Defaults to `false`.
+* `AUTH_USERS_FILE`: Path to a JSON file where users are stored. Defaults to `STATE_DIR/users.json`.
+* `AUTH_ADMIN_USERNAME`: Initial admin username used only when `AUTH_USERS_FILE` does not already contain users.
+* `AUTH_ADMIN_PASSWORD`: Initial admin password used only when `AUTH_USERS_FILE` does not already contain users.
+* `AUTH_SESSION_SECRET`: Secret used to sign login session cookies. If omitted, a temporary secret is generated and sessions are invalidated on restart.
+* `AUTH_SESSION_TTL`: Session lifetime in seconds. Defaults to `2592000` (30 days).
+
+When `ENABLE_AUTH=true`:
+* The first startup must provide `AUTH_ADMIN_USERNAME` and `AUTH_ADMIN_PASSWORD`.
+* The admin user can create and delete additional users from the UI.
+* The admin user can change any user's password from the UI.
+* Each user can change their own password from the UI.
+* Password changes invalidate existing sessions for that user; users must log in again with the new password.
+* `AUTH_ADMIN_USERNAME` and `AUTH_ADMIN_PASSWORD` are bootstrap-only. After `AUTH_USERS_FILE` already has users, changing these values does not overwrite existing passwords.
+* When deleting a user in the UI, the admin can choose whether to delete that user's download files as well.
+* Each user gets isolated queue/history state under `STATE_DIR/users/<username>`.
+* Each user gets isolated download folders under `DOWNLOAD_DIR/<username>` and `AUDIO_DOWNLOAD_DIR/<username>`.
+
+Full `docker-compose.yml` example with persistent user/state storage:
+
+```yaml
+services:
+  metube:
+    build: .
+    container_name: metube-auth-test
+    ports:
+      - "8081:8081"
+    environment:
+      - ENABLE_AUTH=true
+      - AUTH_ADMIN_USERNAME=admin
+      - AUTH_ADMIN_PASSWORD=change-this-password
+      - AUTH_SESSION_SECRET=replace-with-a-long-random-string
+      - AUTH_USERS_FILE=/state/users.json
+      - DOWNLOAD_DIR=/downloads
+      - STATE_DIR=/state
+      - TEMP_DIR=/downloads
+    volumes:
+      - ./downloads:/downloads
+      - ./state:/state
+    restart: unless-stopped
+```
 
 ### Runtime and permissions
 
