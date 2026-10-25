@@ -26,6 +26,7 @@ export class AuthService {
   authStatusChanged$ = new Subject<void>();
 
   loadAuthStatus(onComplete?: () => void) {
+    // Use relative paths to utilize MeTube's built-in URL_PREFIX interceptor
     this.http.get<AuthStatus>('auth/me').subscribe({
       next: (state) => {
         this.enabled = !!state.enabled;
