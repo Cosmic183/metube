@@ -17,6 +17,7 @@ USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{2,31}$")
 VALID_ROLES = {"admin", "user"}
 PASSWORD_HASH_ITERATIONS = 390000
 
+
 def _b64_encode(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
