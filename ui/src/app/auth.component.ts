@@ -1,4 +1,4 @@
-import { Component, inject, OnInit } from '@angular/core';
+import { Component, inject, OnInit, ChangeDetectorRef } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { HttpClient, HttpErrorResponse, HttpParams } from '@angular/common/http';
 import { AuthService, AuthUser } from './auth.service';
@@ -16,7 +16,12 @@ interface AuthResult {
   standalone: true,
   imports: [FormsModule],
   template: `
-    @if (auth.checked && auth.enabled && !auth.authenticated) {
+    @if (!auth.checked) {
+      <div class="text-center mt-5">
+        <div class="spinner-border text-primary" role="status"></div>
+        <div class="mt-2 text-muted">Securing connection...</div>
+      </div>
+    } @else if (auth.enabled && !auth.authenticated) {
       <div class="row justify-content-center mt-5">
         <div class="col-12 col-md-6 col-lg-5">
           <div class="card shadow-sm">
@@ -185,6 +190,7 @@ interface AuthResult {
 export class AuthComponent implements OnInit {
   auth = inject(AuthService);
   private http = inject(HttpClient);
+  private cdr = inject(ChangeDetectorRef);
 
   loginUsername = '';
   loginPassword = '';
@@ -213,9 +219,13 @@ export class AuthComponent implements OnInit {
   passwordSuccess = '';
 
   ngOnInit() {
-    this.auth.openPasswordModal$.subscribe(() => this.openOwnPasswordModal());
+    this.auth.openPasswordModal$.subscribe(() => {
+      this.openOwnPasswordModal();
+      this.cdr.markForCheck();
+    });
     this.auth.authStatusChanged$.subscribe(() => {
       if (this.isAdmin()) this.loadUsers();
+      this.cdr.markForCheck();
     });
   }
 
@@ -235,10 +245,12 @@ export class AuthComponent implements OnInit {
         if (result.status === 'ok') return window.location.reload();
         this.loginError = result.msg || 'Login failed.';
         this.loginInProgress = false;
+        this.cdr.markForCheck();
       },
       error: (error: HttpErrorResponse) => {
         this.loginError = error.error?.msg || 'Invalid username or password.';
         this.loginInProgress = false;
+        this.cdr.markForCheck();
       }
     });
   }
@@ -246,16 +258,13 @@ export class AuthComponent implements OnInit {
   loadUsers() {
     if (!this.isAdmin()) return;
     this.http.get<{ users: AuthUser[] }>('auth/users').subscribe({
-      next: (res) => this.users = res.users || [],
-      error: () => this.users = []
+      next: (res) => { this.users = res.users || []; this.cdr.markForCheck(); },
+      error: () => { this.users = []; this.cdr.markForCheck(); }
     });
   }
 
   createUser() {
-    this.userCreateError = '';
-    this.userCreateSuccess = '';
-    this.userDeleteError = '';
-    this.userDeleteSuccess = '';
+    this.userCreateError = ''; this.userCreateSuccess = ''; this.userDeleteError = ''; this.userDeleteSuccess = '';
     if (!this.isAdmin()) return;
     if (this.newUsername.trim().length === 0 || this.newPassword.length === 0) {
       this.userCreateError = 'Username and password are required.';
@@ -272,10 +281,12 @@ export class AuthComponent implements OnInit {
           this.userCreateError = result.msg || 'Failed to create user.';
         }
         this.userCreateInProgress = false;
+        this.cdr.markForCheck();
       },
       error: (error: HttpErrorResponse) => {
         this.userCreateError = error.error?.msg || 'Failed to create user.';
         this.userCreateInProgress = false;
+        this.cdr.markForCheck();
       }
     });
   }
@@ -313,10 +324,12 @@ export class AuthComponent implements OnInit {
           this.userDeleteError = result.msg || 'Failed to delete user.';
           this.deletingUsers.delete(username);
         }
+        this.cdr.markForCheck();
       },
       error: (error: HttpErrorResponse) => {
         this.userDeleteError = error.error?.msg || 'Failed to delete user.';
         this.deletingUsers.delete(username);
+        this.cdr.markForCheck();
       }
     });
   }
@@ -370,10 +383,12 @@ export class AuthComponent implements OnInit {
           this.passwordError = result.msg || 'Failed to change password.';
         }
         this.passwordInProgress = false;
+        this.cdr.markForCheck();
       },
       error: (error: HttpErrorResponse) => {
         this.passwordError = error.error?.msg || 'Failed to change password.';
         this.passwordInProgress = false;
+        this.cdr.markForCheck();
       }
     });
   }
