@@ -153,6 +153,7 @@ export class App implements AfterViewInit, OnInit {
 
   getMatchingCustomDir() : Observable<string[]> {
     return this.downloads.customDirsChanged.asObservable().pipe(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       map((output: any) => this.isAudioType() ? output["audio_download_dir"] : output["download_dir"]),
       distinctUntilChanged((prev, curr) => JSON.stringify(prev) === JSON.stringify(curr))
     );
@@ -160,6 +161,7 @@ export class App implements AfterViewInit, OnInit {
 
   getYtdlOptionsUpdateTime() {
     this.downloads.ytdlOptionsChanged.subscribe({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       next: (data:any) => {
         if (data['success']){
           const date = new Date(data['update_time'] * 1000);
@@ -168,8 +170,10 @@ export class App implements AfterViewInit, OnInit {
       }
     });
   }
+
   getConfiguration() {
     this.downloads.configurationChanged.subscribe({
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       next: (config: any) => {
         const playlistItemLimit = config['DEFAULT_OPTION_PLAYLIST_ITEM_LIMIT'];
         if (playlistItemLimit !== '0') this.playlistItemLimit = playlistItemLimit;
@@ -265,7 +269,7 @@ export class App implements AfterViewInit, OnInit {
   }
 
   downloadSelectedFiles() {
-    this.downloads.done.forEach((dl, _) => {
+    this.downloads.done.forEach((dl) => {
       if (dl.status === 'finished' && dl.checked) {
         const link = document.createElement('a');
         link.href = this.buildDownloadLink(dl);
@@ -361,6 +365,7 @@ export class App implements AfterViewInit, OnInit {
   }
 
   fetchVersionInfo(): void {
+    // eslint-disable-next-line no-useless-escape
     const baseUrl = `${window.location.origin}${window.location.pathname.replace(/\/[^\/]*$/, '/')}`;
     const versionUrl = `${baseUrl}version`;
     this.http.get<{ 'yt-dlp': string, version: string }>(versionUrl)
