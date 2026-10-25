@@ -7,6 +7,12 @@ export interface AuthUser {
   role: 'admin' | 'user';
 }
 
+export interface AuthStatus {
+  enabled: boolean;
+  authenticated: boolean;
+  user: AuthUser | null;
+}
+
 @Injectable({ providedIn: 'root' })
 export class AuthService {
   private http = inject(HttpClient);
@@ -20,7 +26,7 @@ export class AuthService {
   authStatusChanged$ = new Subject<void>();
 
   loadAuthStatus(onComplete?: () => void) {
-    this.http.get<any>('auth/me').subscribe({
+    this.http.get<AuthStatus>('auth/me').subscribe({
       next: (state) => {
         this.enabled = !!state.enabled;
         this.authenticated = !!state.authenticated;
